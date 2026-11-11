@@ -33,6 +33,9 @@ def main():
                 frame_bytes = p[0] * p[1]
                 if offset != "-":
                     gap = round(float(offset) * p[2]) - written
+                    if gap < -p[2] // 2:  # сегмент начинается раньше, чем кончился предыдущий
+                        print(f"  ⚠️  {path.rsplit('/', 1)[-1]}: перекрытие {-gap / p[2]:.2f} с с предыдущим "
+                              f"сегментом — дальше дорожка может отставать на это время", file=sys.stderr)
                     if gap > 0:  # пауза перед сегментом → тишина
                         print(f"  {path.rsplit('/', 1)[-1]}: пауза {gap / p[2]:.2f} с заполнена тишиной",
                               file=sys.stderr)

@@ -77,9 +77,15 @@ segments() {
       else echo "⚠️  сегмент $name из манифеста не найден" >&2
       fi
     done < "$manifest"
-  else
-    for ext in caf m4a; do
-      if [[ -f "$DIR/$t.$ext" ]]; then printf -- '-\t%s\n' "$DIR/$t.$ext"; return 0; fi
+  else # без манифеста: track.caf, track.1.caf… вплотную друг к другу
+    local i=0
+    while :; do
+      if [[ $i -eq 0 ]]; then name="$t"; else name="$t.$i"; fi
+      if   [[ -f "$DIR/$name.caf" ]]; then printf -- '-\t%s\n' "$DIR/$name.caf"
+      elif [[ -f "$DIR/$name.m4a" ]]; then printf -- '-\t%s\n' "$DIR/$name.m4a"
+      else return 0
+      fi
+      i=$((i + 1))
     done
   fi
 }
@@ -101,7 +107,11 @@ for track in mic system; do
   done < <(segments "$track")
   if [[ ${#concat_args[@]} -eq 0 ]]; then echo "❌ Нет пригодных сегментов дорожки $track в $DIR"; exit 1; fi
   echo "  сегментов: $(( ${#concat_args[@]} / 2 ))"
-  python3 "$ROOT/scripts/concat_wav.py" "$DIR/$track.16k.wav" "${concat_args[@]}"
+  if [[ ${#concat_args[@]} -eq 2 ]]; then
+    mv "${concat_args[1]}" "$DIR/$track.16k.wav" # один сегмент — склеивать нечего
+  else
+    python3 "$ROOT/scripts/concat_wav.py" "$DIR/$track.16k.wav" "${concat_args[@]}"
+  fi
   rm -f "$DIR/$track".part*.16k.wav
   echo "→ $track: транскрибирую (whisper, lang=$LANG_CODE)"
   start=$(date +%s)

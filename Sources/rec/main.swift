@@ -15,8 +15,10 @@ import Foundation
 
 setvbuf(stdout, nil, _IONBF, 0)
 
-/// Общая точка отсчёта для манифестов обеих дорожек. Задаётся один раз до старта записи.
-var recordingT0 = Date()
+/// Общая точка отсчёта для манифестов обеих дорожек (монотонные часы — не зависят от
+/// подстройки системного времени). Задаётся один раз до старта записи.
+var recordingT0 = ProcessInfo.processInfo.systemUptime
+func sinceStart() -> TimeInterval { ProcessInfo.processInfo.systemUptime - recordingT0 }
 
 struct RecError: Error, CustomStringConvertible {
     let description: String
@@ -109,6 +111,7 @@ final class Track {
     private let fileLock = NSLock()  // файл и сегменты — медленный I/O
     private var file: AVAudioFile?
     private var segment = -1
+    private var manifestPending: String? // сегмент открыт, но ещё не получил ни одного буфера
     private var level: Float = 0
     private var stats = TrackStats()
     private var _sampleRate: Double = 0
@@ -126,19 +129,24 @@ final class Track {
             let newFile = try makeTrackFile(dir.appendingPathComponent(fileName), format: format)
             segment = index
             file = newFile // предыдущий сегмент закрывается при освобождении
-            appendManifest(fileName)
+            // В манифест — по первому реально записанному буферу: так момент начала учитывает
+            // задержку старта устройства, а пустые сегменты (неудачный старт) не попадают вовсе.
+            manifestPending = fileName
             lock.withLock { _sampleRate = format.sampleRate; stats.segments = index + 1 }
             return fileName
         }
     }
 
-    private func appendManifest(_ fileName: String) {
+    private func appendManifest(_ fileName: String, offset: TimeInterval) {
         let url = dir.appendingPathComponent("\(name).segments")
-        let line = String(format: "%@\t%.3f\n", fileName, Date().timeIntervalSince(recordingT0))
+        let line = String(format: "%@\t%.3f\n", fileName, max(0, offset))
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }
-        guard let h = try? FileHandle(forWritingTo: url) else { return }
+        guard let h = try? FileHandle(forWritingTo: url) else {
+            log("\n❌ не могу дописать манифест \(url.lastPathComponent) — сегмент \(fileName) не попадёт в склейку")
+            return
+        }
         h.seekToEndOfFile()
         h.write(Data(line.utf8))
         try? h.close()
@@ -149,7 +157,14 @@ final class Track {
         var writeError: Error?
         let written: Bool = fileLock.withLock {
             guard let file else { return false }
-            do { try file.write(from: buffer); return true } catch { writeError = error; return false }
+            do {
+                try file.write(from: buffer)
+                if let pending = manifestPending { // первый буфер сегмента: начало = сейчас − длина буфера
+                    manifestPending = nil
+                    appendManifest(pending, offset: sinceStart() - Double(buffer.frameLength) / buffer.format.sampleRate)
+                }
+                return true
+            } catch { writeError = error; return false }
         }
         lock.withLock {
             level = max(level, p)
@@ -245,6 +260,7 @@ final class MicRecorder {
     let track: Track
     private var observer: NSObjectProtocol?
     private var stopped = false
+    private var generation = 0 // каждое уведомление отменяет повторные попытки предыдущего
 
     init(dir: URL) { track = Track(dir: dir, name: "mic") }
 
@@ -256,7 +272,12 @@ final class MicRecorder {
         ) { [weak self] _ in
             guard let self, !self.stopped else { return }
             log("\n⚠️  mic: конфигурация аудио изменилась — перезапускаю запись в новый сегмент")
-            retry("mic: перезапуск", while: { [weak self] in self.map { !$0.stopped } ?? false }) { [weak self] in
+            self.generation += 1
+            let gen = self.generation
+            retry("mic: перезапуск", while: { [weak self] in
+                guard let self else { return false }
+                return !self.stopped && self.generation == gen
+            }) { [weak self] in
                 try self?.restartEngine()
             }
         }
@@ -305,8 +326,10 @@ final class SystemAudioRecorder {
     let track: Track
     private var stopped = false
     private var outputListener: AudioObjectPropertyListenerBlock?
+    private var generation = 0 // каждое уведомление о смене выхода отменяет попытки предыдущего
 
     // Состояние ниже меняется только на `queue` (IO-callback и слушатель частоты идут на ней).
+    private var activeAggregate = AudioObjectID(kAudioObjectUnknown)
     private var format: AVAudioFormat!
     private var buffer: AVAudioPCMBuffer?
     private var tapChannels: AVAudioChannelCount = 2
@@ -338,8 +361,12 @@ final class SystemAudioRecorder {
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self, !self.stopped else { return }
             log("\n⚠️  system: устройство вывода сменилось — пересоздаю захват в новый сегмент")
-            self.tearDown()
-            retry("system: пересоздание захвата", while: { [weak self] in self.map { !$0.stopped } ?? false }) { [weak self] in
+            self.generation += 1
+            let gen = self.generation
+            retry("system: пересоздание захвата", while: { [weak self] in
+                guard let self else { return false }
+                return !self.stopped && self.generation == gen
+            }) { [weak self] in
                 guard let self else { return }
                 do { try self.setUp() } catch { self.tearDown(); throw error }
             }
@@ -349,7 +376,9 @@ final class SystemAudioRecorder {
         else { log("⚠️  не удалось подписаться на смену устройства вывода: OSStatus \(status)") }
     }
 
+    /// Создаёт захват; если предыдущий ещё жив — сначала освобождает его (идемпотентно).
     private func setUp() throws {
+        tearDown()
         // 1. Глобальный tap: весь системный звук (Zoom, браузер с Meet и т.д.), сведённый в стерео.
         let tap = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         tap.uuid = UUID()
@@ -383,25 +412,29 @@ final class SystemAudioRecorder {
         guard let tapFormat = AVAudioFormat(streamDescription: &asbd),
               tapFormat.commonFormat == .pcmFormatFloat32, asbd.mBytesPerFrame > 0
         else { throw RecError("неподдерживаемый формат tap'а: \(asbd)") }
-        tapChannels = tapFormat.channelCount
-        tapInterleaved = tapFormat.isInterleaved
 
         // Aggregate тактируется устройством вывода. У AirPods в режиме гарнитуры (HFP)
         // это 16/24 kHz, а tap сообщает 48 kHz — в файл пишем реальную частоту aggregate,
         // иначе запись будет с неправильной скоростью. Если частота сменится позже —
         // слушатель откроет новый сегмент (см. watchSampleRate).
-        let sampleRate = currentRate() ?? tapFormat.sampleRate
-        let fileName = try queue.sync { try self.openSegment(rate: sampleRate) }
+        let aggregate = aggregateID
+        let sampleRate = Self.rate(of: aggregate) ?? tapFormat.sampleRate
+        let fileName = try queue.sync { () throws -> String in
+            self.tapChannels = tapFormat.channelCount
+            self.tapInterleaved = tapFormat.isInterleaved
+            self.activeAggregate = aggregate
+            return try self.openSegment(rate: sampleRate)
+        }
 
         // 4. Раскладка буферов в callback'е: сначала входные потоки устройства вывода
         //    (микрофон AirPods / USB-гарнитуры), за ними — потоки tap'а (их и берём).
         let deviceInputs = Devices.streamCount(output.id, scope: kAudioObjectPropertyScopeInput)
-        let tapBuffers = tapInterleaved ? 1 : Int(tapChannels)
-        let channelsPerBuffer = tapInterleaved ? tapChannels : 1
+        let tapBuffers = tapFormat.isInterleaved ? 1 : Int(tapFormat.channelCount)
+        let channelsPerBuffer = tapFormat.isInterleaved ? tapFormat.channelCount : 1
         let bytesPerFrame = Int(asbd.mBytesPerFrame) // не зависит от частоты
         log("🔈 вывод:  \(output.name) [\(output.uid)], входных потоков у него: \(deviceInputs)")
         log("🔊 system: tap \(Int(tapFormat.sampleRate)) Hz / aggregate \(Int(sampleRate)) Hz, " +
-            "\(tapChannels) ch, interleaved=\(tapInterleaved) → \(fileName)")
+            "\(tapFormat.channelCount) ch, interleaved=\(tapFormat.isInterleaved) → \(fileName)")
 
         // Буфер (self.buffer) переиспользуется между callback'ами: на аудиопути нет аллокаций,
         // кроме редкого роста буфера и смены сегмента.
@@ -433,14 +466,15 @@ final class SystemAudioRecorder {
         // 5. Не включать микрофон устройства вывода: если AirPods — только выход (микрофон
         //    встроенный), иначе они ушли бы в режим гарнитуры (HFP) из-за нас.
         disableDeviceInputStreams(deviceInputs)
-        watchSampleRate()
+        watchSampleRate(aggregate)
         try check(AudioDeviceStart(aggregateID, procID), "AudioDeviceStart")
         // Частота могла смениться между чтением и подпиской (AirPods переключаются асинхронно).
-        queue.async { self.rotateIfRateChanged() }
+        queue.async { self.rotateIfRateChanged(aggregate) }
     }
 
     /// Освобождает tap/aggregate (можно вызывать повторно и после частичного setUp).
     private func tearDown() {
+        queue.sync { activeAggregate = AudioObjectID(kAudioObjectUnknown) } // гасит запоздалые события частоты
         if aggregateID != AudioObjectID(kAudioObjectUnknown) {
             if let rateListener {
                 var addr = Devices.address(kAudioDevicePropertyNominalSampleRate)
@@ -462,11 +496,11 @@ final class SystemAudioRecorder {
         }
     }
 
-    private func currentRate() -> Double? {
+    private static func rate(of device: AudioObjectID) -> Double? {
         var rate = Float64(0)
         var size = UInt32(MemoryLayout<Float64>.size)
         var addr = Devices.address(kAudioDevicePropertyNominalSampleRate)
-        guard AudioObjectGetPropertyData(aggregateID, &addr, 0, nil, &size, &rate) == noErr, rate > 0 else { return nil }
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &rate) == noErr, rate > 0 else { return nil }
         return rate
     }
 
@@ -483,9 +517,9 @@ final class SystemAudioRecorder {
 
     /// Только на `queue`: если частота aggregate изменилась — продолжаем в новый сегмент
     /// с правильной частотой, чтобы дорожка «они» не исказилась по скорости.
-    private func rotateIfRateChanged() {
-        guard aggregateID != AudioObjectID(kAudioObjectUnknown),
-              let rate = currentRate(), let old = format, rate != old.sampleRate else { return }
+    private func rotateIfRateChanged(_ aggregate: AudioObjectID) {
+        guard aggregate == activeAggregate, // событие от уже освобождённого захвата — игнорируем
+              let rate = Self.rate(of: aggregate), let old = format, rate != old.sampleRate else { return }
         do {
             let fileName = try openSegment(rate: rate)
             log("\n⚠️  system: частота устройства вывода \(Int(old.sampleRate)) → \(Int(rate)) Hz, новый сегмент \(fileName)")
@@ -494,9 +528,9 @@ final class SystemAudioRecorder {
         }
     }
 
-    private func watchSampleRate() {
+    private func watchSampleRate(_ aggregate: AudioObjectID) {
         var addr = Devices.address(kAudioDevicePropertyNominalSampleRate)
-        let listener: AudioObjectPropertyListenerBlock = { [unowned self] _, _ in self.rotateIfRateChanged() }
+        let listener: AudioObjectPropertyListenerBlock = { [unowned self] _, _ in self.rotateIfRateChanged(aggregate) }
         let status = AudioObjectAddPropertyListenerBlock(aggregateID, &addr, queue, listener)
         if status == noErr { rateListener = listener }
         else { log("⚠️  не удалось подписаться на смену частоты: OSStatus \(status)") }
@@ -599,7 +633,7 @@ func run() -> Never {
     let mic = MicRecorder(dir: outDir)
     let system = SystemAudioRecorder(dir: outDir)
     let timer = DispatchSource.makeTimerSource(queue: .main)
-    recordingT0 = Date()
+    recordingT0 = ProcessInfo.processInfo.systemUptime
 
     // Сигналы перехватываем ДО старта: файлы корректно закроются на Ctrl+C, kill и закрытии
     // вкладки терминала, даже если сигнал пришёл во время запуска (обработчик выполнится на
@@ -611,7 +645,7 @@ func run() -> Never {
             timer.cancel()
             mic.stop()
             system.stop()
-            let elapsed = Date().timeIntervalSince(recordingT0)
+            let elapsed = sinceStart()
             print("")
             log("■ stop (signal \(sig)), длительность \(Int(elapsed)) с", echo: false)
             log(describe("mic", mic.track, elapsed: elapsed), echo: false)
@@ -643,7 +677,7 @@ func run() -> Never {
     var ticks = 0
     timer.schedule(deadline: .now() + 1, repeating: 1)
     timer.setEventHandler {
-        let t = Int(Date().timeIntervalSince(recordingT0))
+        let t = Int(sinceStart())
         let micLevel = mic.track.takeLevel()
         let sysLevel = system.track.takeLevel()
         micPeak = max(micPeak, micLevel)
