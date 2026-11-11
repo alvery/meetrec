@@ -7,8 +7,8 @@ if [[ -f "$CONFIG" ]]; then
     [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
     key="${BASH_REMATCH[2]}"
     value="${BASH_REMATCH[3]}"
-    if [[ ${#value} -ge 2 && ( "$value" == \"*\" || "$value" == \'*\' ) ]]; then
-      value="${value:1:${#value}-2}"
+    if [[ "$value" =~ ^\"([^\"]*)\"[[:space:]]*(#.*)?$ || "$value" =~ ^\'([^\']*)\'[[:space:]]*(#.*)?$ ]]; then
+      value="${BASH_REMATCH[1]}"                # в кавычках (+ необязательный комментарий)
     else
       value="${value%%[[:space:]]#*}"            # комментарий в конце строки без кавычек
       value="${value%"${value##*[![:space:]]}"}" # хвостовые пробелы

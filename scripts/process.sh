@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Обработка записанной встречи:
 #   mic + system (caf или m4a) → транскрипция (whisper.cpp + VAD) → transcript.md → notes.md (claude -p)
-#   Сегменты дорожек (track.caf, track.1.caf…) склеиваются по порядку.
+#   Сегменты дорожек (track.caf, track.1.caf…) склеиваются по манифесту, паузы — тишиной.
 #   В конце исходные .caf (~2 ГБ/час) сжимаются в .m4a (десятки МБ/час).
 #   Технический лог пишется в process.log; если задан MEETREC_REPORT_HOST — отчёт уходит на сервер.
 #   Переменные из ~/.config/meetrec/env не перекрывают заданные в командной строке.
@@ -63,36 +63,46 @@ else
 fi
 echo "whisper: ${whisper_opts[*]}"
 
-# Сегменты дорожки по порядку: track.caf, track.1.caf, track.2.caf… (или уже сжатые .m4a).
-# Новый сегмент rec открывает, когда меняется формат устройства (например, AirPods ушли в HFP).
+# Сегменты дорожки по манифесту rec (<track>.segments: «файл<TAB>секунды от начала записи»).
+# Печатает «offset<TAB>путь» по порядку; сегмент берётся как .caf или уже сжатый .m4a.
+# Записи без манифеста — один файл <track>.caf/.m4a с offset «-».
 segments() {
-  local t="$1" i=0 name
-  while :; do
-    if [[ $i -eq 0 ]]; then name="$t"; else name="$t.$i"; fi
-    if   [[ -f "$DIR/$name.caf" ]]; then echo "$DIR/$name.caf"
-    elif [[ -f "$DIR/$name.m4a" ]]; then echo "$DIR/$name.m4a"
-    else return 0
-    fi
-    i=$((i + 1))
-  done
+  local t="$1" manifest="$DIR/$1.segments" name off base ext
+  if [[ -f "$manifest" ]]; then
+    while IFS=$'\t' read -r name off || [[ -n "$name" ]]; do
+      [[ -n "$name" ]] || continue
+      base="$DIR/${name%.caf}"
+      if   [[ -f "$base.caf" ]]; then printf '%s\t%s\n' "$off" "$base.caf"
+      elif [[ -f "$base.m4a" ]]; then printf '%s\t%s\n' "$off" "$base.m4a"
+      else echo "⚠️  сегмент $name из манифеста не найден" >&2
+      fi
+    done < "$manifest"
+  else
+    for ext in caf m4a; do
+      if [[ -f "$DIR/$t.$ext" ]]; then printf -- '-\t%s\n' "$DIR/$t.$ext"; return 0; fi
+    done
+  fi
 }
 
 for track in mic system; do
-  segs=()
-  while IFS= read -r f; do segs+=("$f"); done < <(segments "$track")
-  if [[ ${#segs[@]} -eq 0 ]]; then echo "❌ Нет $DIR/$track.caf / .m4a"; exit 1; fi
-  echo "→ $track: конвертирую в 16 kHz mono (сегментов: ${#segs[@]})"
-  parts=()
-  for i in "${!segs[@]}"; do
-    afconvert -f WAVE -d LEI16@16000 -c 1 --mix "${segs[$i]}" "$DIR/$track.part$i.16k.wav"
-    parts+=("$DIR/$track.part$i.16k.wav")
-  done
-  if [[ ${#parts[@]} -eq 1 ]]; then
-    mv "${parts[0]}" "$DIR/$track.16k.wav"
-  else
-    python3 "$ROOT/scripts/concat_wav.py" "$DIR/$track.16k.wav" "${parts[@]}"
-    rm -f "${parts[@]}"
-  fi
+  echo "→ $track: конвертирую сегменты в 16 kHz mono"
+  concat_args=()
+  i=0
+  while IFS=$'\t' read -r off seg; do
+    part="$DIR/$track.part$i.16k.wav"
+    i=$((i + 1))
+    # Пустой или битый сегмент (например, оборванный при переключении устройства) пропускаем.
+    if afconvert -f WAVE -d LEI16@16000 -c 1 --mix "$seg" "$part" < /dev/null; then
+      concat_args+=("$off" "$part")
+    else
+      rm -f "$part"
+      echo "⚠️  пропускаю сегмент $(basename "$seg"): не читается (пустой?)"
+    fi
+  done < <(segments "$track")
+  if [[ ${#concat_args[@]} -eq 0 ]]; then echo "❌ Нет пригодных сегментов дорожки $track в $DIR"; exit 1; fi
+  echo "  сегментов: $(( ${#concat_args[@]} / 2 ))"
+  python3 "$ROOT/scripts/concat_wav.py" "$DIR/$track.16k.wav" "${concat_args[@]}"
+  rm -f "$DIR/$track".part*.16k.wav
   echo "→ $track: транскрибирую (whisper, lang=$LANG_CODE)"
   start=$(date +%s)
   # stdout whisper = текст транскрипта → не в лог; stderr (загрузка, ошибки, тайминги) — в лог.
@@ -117,7 +127,7 @@ echo "  готово за $(( $(date +%s) - start )) с"
 # Битрейт выбирает afconvert под частоту/каналы дорожки.
 if [[ "${KEEP_RAW:-0}" != "1" ]]; then
   for track in mic system; do
-    while IFS= read -r seg; do
+    while IFS=$'\t' read -r _ seg; do
       [[ "$seg" == *.caf ]] || continue
       out="${seg%.caf}.m4a"
       echo "→ $(basename "$seg"): сжимаю в m4a"
