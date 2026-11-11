@@ -65,7 +65,7 @@ echo "whisper: ${whisper_opts[*]}"
 
 # Сегменты дорожки по манифесту rec (<track>.segments: «файл<TAB>секунды от начала записи»).
 # Печатает «offset<TAB>путь» по порядку; сегмент берётся как .caf или уже сжатый .m4a.
-# Записи без манифеста — один файл <track>.caf/.m4a с offset «-».
+# Без манифеста — track.caf, track.1.caf… вплотную друг к другу (offset «-»).
 segments() {
   local t="$1" manifest="$DIR/$1.segments" name off base ext
   if [[ -f "$manifest" ]]; then
@@ -107,8 +107,10 @@ for track in mic system; do
   done < <(segments "$track")
   if [[ ${#concat_args[@]} -eq 0 ]]; then echo "❌ Нет пригодных сегментов дорожки $track в $DIR"; exit 1; fi
   echo "  сегментов: $(( ${#concat_args[@]} / 2 ))"
-  if [[ ${#concat_args[@]} -eq 2 ]]; then
-    mv "${concat_args[1]}" "$DIR/$track.16k.wav" # один сегмент — склеивать нечего
+  # Один сегмент без смещения — склеивать нечего. Со смещением (system обычно стартует
+  # на доли секунды позже mic) — через concat_wav, чтобы добавить тишину в начало.
+  if [[ ${#concat_args[@]} -eq 2 && ( "${concat_args[0]}" == "-" || "${concat_args[0]}" == "0.000" ) ]]; then
+    mv "${concat_args[1]}" "$DIR/$track.16k.wav"
   else
     python3 "$ROOT/scripts/concat_wav.py" "$DIR/$track.16k.wav" "${concat_args[@]}"
   fi
