@@ -12,7 +12,8 @@
 rec  ──►  mic.caf     («Я» — микрофон)
      └─►  system.caf  («Они» — системный звук через Core Audio process tap)
 
-process.sh ──► whisper.cpp (локально) ──► transcript.md ──► claude -p ──► notes.md
+process.sh ──► whisper.cpp + VAD (локально) ──► transcript.md ──► claude -p ──► notes.md
+           └─► исходники .caf сжимаются в .m4a (~30 МБ/час)
 ```
 
 Две отдельные дорожки дают точное разделение «я / они» без ML-диаризации.
@@ -28,7 +29,7 @@ process.sh ──► whisper.cpp (локально) ──► transcript.md ─�
 
 ```bash
 git clone https://github.com/alvery/meetrec.git && cd meetrec
-./scripts/setup.sh          # whisper.cpp + модель large-v3-turbo (~1.6 ГБ)
+./scripts/setup.sh          # whisper.cpp + модели large-v3-turbo (~1.6 ГБ) и silero VAD
 swift build -c release      # бинарь: .build/release/rec
 ```
 
@@ -49,6 +50,9 @@ swift build -c release      # бинарь: .build/release/rec
 ```
 
 Если «они» всё время пустые — см. разрешения ниже.
+Запись корректно завершается и по Ctrl+C, и при закрытии вкладки терминала.
+Во время записи пишется несжатый PCM (~2 ГБ/час на обе дорожки) — без потерь и без нагрузки на CPU;
+`process.sh` в конце сжимает исходники в m4a (десятки МБ/час).
 
 ### Настройки обработки
 
@@ -56,10 +60,35 @@ swift build -c release      # бинарь: .build/release/rec
 |---|---|---|
 | `WHISPER_LANG` | `ru` | `ru`, `en` или `auto` |
 | `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | любая ggml-модель whisper.cpp |
-| `NOTES_CMD` | `claude -p` | любая команда: промпт аргументом, транскрипт в stdin |
-| `KEEP_AUDIO` | `0` | `1` — не удалять промежуточные 16 kHz wav |
+| `VAD_MODEL` | `models/ggml-silero-v5.1.2.bin` | вырезает тишину, убирает галлюцинации whisper |
+| `NOTES_CMD` | `claude -p` | shell-команда (кавычки работают): промпт последним аргументом, транскрипт в stdin |
+| `KEEP_RAW` | `0` | `1` — не сжимать исходные .caf в .m4a |
 
 Промпт заметок — [`prompts/notes.md`](prompts/notes.md), правь под себя.
+
+## Отладочные отчёты
+
+`rec` пишет `rec.log` (устройства, форматы, счётчики записанных/пропущенных кадров),
+`process.sh` — `process.log` (версии, время шагов, ошибки). `scripts/report.sh` собирает
+их вместе с версией macOS, списком аудиоустройств и параметрами файлов и отправляет по SSH
+на сервер, где их читает Claude и чинит код.
+
+**Не отправляются:** аудио, транскрипты, заметки.
+
+Настройка — один раз:
+
+```bash
+mkdir -p ~/.config/meetrec
+echo 'MEETREC_REPORT_HOST=user@your-server' >> ~/.config/meetrec/env
+ssh user@your-server true   # проверь, что вход по ключу работает без пароля
+```
+
+После этого `process.sh` отправляет отчёт сам в конце каждой обработки (и при ошибке).
+Вручную — например, если упал `rec`:
+
+```bash
+./scripts/report.sh ~/Meetings/2026-11-11-153000 "дорожка они пустая с AirPods"
+```
 
 ## Разрешения macOS
 
@@ -78,4 +107,5 @@ swift build -c release      # бинарь: .build/release/rec
 - Дорожки стартуют почти одновременно, но без точной синхронизации (расхождение — десятки мс, для транскрипта не критично).
 - Системный tap пишет *весь* звук Mac — уведомления и музыка тоже попадут в запись.
 - Если сменить устройство вывода/ввода (подключить AirPods) посреди записи — поведение не проверено.
+  Устройства, подключённые *до* старта (AirPods, USB-гарнитуры), поддерживаются.
 - Внутри «Они» спикеры не разделены — на групповых созвонах Claude разбирает по контексту.

@@ -3,4 +3,7 @@
 models/
 *.caf
 *.wav
+*.m4a
+*.part
 .DS_Store
+__pycache__/
