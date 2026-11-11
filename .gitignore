@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+models/
+*.caf
+*.wav
+.DS_Store
