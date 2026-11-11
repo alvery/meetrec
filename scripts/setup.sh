@@ -5,8 +5,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL_NAME="${MODEL_NAME:-ggml-large-v3-turbo.bin}"
 
 command -v brew >/dev/null || { echo "❌ Нужен Homebrew: https://brew.sh"; exit 1; }
-if command -v whisper-cli >/dev/null; then
-  brew upgrade whisper-cpp 2>/dev/null || true   # нужна свежая версия с поддержкой --vad
+if brew list --versions whisper-cpp >/dev/null 2>&1; then
+  # нужна свежая версия с поддержкой --vad
+  brew upgrade whisper-cpp || echo "⚠️  brew upgrade whisper-cpp не удался — VAD может быть недоступен"
+elif command -v whisper-cli >/dev/null; then
+  echo "⚠️  whisper-cli установлен не через brew ($(command -v whisper-cli)) — обнови его сам, нужна поддержка --vad"
 else
   brew install whisper-cpp
 fi

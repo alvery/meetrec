@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Обработка записанной встречи:
 #   mic + system (caf или m4a) → транскрипция (whisper.cpp + VAD) → transcript.md → notes.md (claude -p)
+#   Сегменты дорожек (track.caf, track.1.caf…) склеиваются по порядку.
 #   В конце исходные .caf (~2 ГБ/час) сжимаются в .m4a (десятки МБ/час).
 #   Технический лог пишется в process.log; если задан MEETREC_REPORT_HOST — отчёт уходит на сервер.
 #   Переменные из ~/.config/meetrec/env не перекрывают заданные в командной строке.
@@ -51,7 +52,7 @@ command -v whisper-cli >/dev/null || { echo "❌ whisper-cli не найден. 
 
 # VAD вырезает тишину: дорожки по большей части молчат (пока говорят другие),
 # а на тишине whisper галлюцинирует («Субтитры сделал…»).
-whisper_opts=(-m "$MODEL" -l "$LANG_CODE" -oj -np -sns)
+whisper_opts=(-m "$MODEL" -l "$LANG_CODE" -oj -sns) # без -np: он глушит и ошибки
 whisper_help="$(whisper-cli --help 2>&1 || true)" # без пайпа в grep -q: иначе SIGPIPE + pipefail
 if [[ "$whisper_help" != *--vad* ]]; then
   echo "⚠️  whisper-cli без поддержки VAD — обнови: brew upgrade whisper-cpp"
@@ -62,16 +63,39 @@ else
 fi
 echo "whisper: ${whisper_opts[*]}"
 
+# Сегменты дорожки по порядку: track.caf, track.1.caf, track.2.caf… (или уже сжатые .m4a).
+# Новый сегмент rec открывает, когда меняется формат устройства (например, AirPods ушли в HFP).
+segments() {
+  local t="$1" i=0 name
+  while :; do
+    if [[ $i -eq 0 ]]; then name="$t"; else name="$t.$i"; fi
+    if   [[ -f "$DIR/$name.caf" ]]; then echo "$DIR/$name.caf"
+    elif [[ -f "$DIR/$name.m4a" ]]; then echo "$DIR/$name.m4a"
+    else return 0
+    fi
+    i=$((i + 1))
+  done
+}
+
 for track in mic system; do
-  if   [[ -f "$DIR/$track.caf" ]]; then src="$DIR/$track.caf"
-  elif [[ -f "$DIR/$track.m4a" ]]; then src="$DIR/$track.m4a"
-  else echo "❌ Нет $DIR/$track.caf / .m4a"; exit 1
+  segs=()
+  while IFS= read -r f; do segs+=("$f"); done < <(segments "$track")
+  if [[ ${#segs[@]} -eq 0 ]]; then echo "❌ Нет $DIR/$track.caf / .m4a"; exit 1; fi
+  echo "→ $track: конвертирую в 16 kHz mono (сегментов: ${#segs[@]})"
+  parts=()
+  for i in "${!segs[@]}"; do
+    afconvert -f WAVE -d LEI16@16000 -c 1 --mix "${segs[$i]}" "$DIR/$track.part$i.16k.wav"
+    parts+=("$DIR/$track.part$i.16k.wav")
+  done
+  if [[ ${#parts[@]} -eq 1 ]]; then
+    mv "${parts[0]}" "$DIR/$track.16k.wav"
+  else
+    python3 "$ROOT/scripts/concat_wav.py" "$DIR/$track.16k.wav" "${parts[@]}"
+    rm -f "${parts[@]}"
   fi
-  echo "→ $track: конвертирую в 16 kHz mono"
-  afconvert -f WAVE -d LEI16@16000 -c 1 --mix "$src" "$DIR/$track.16k.wav"
   echo "→ $track: транскрибирую (whisper, lang=$LANG_CODE)"
   start=$(date +%s)
-  # stdout whisper = текст транскрипта → не в лог; stderr (ошибки, тайминги) — в лог.
+  # stdout whisper = текст транскрипта → не в лог; stderr (загрузка, ошибки, тайминги) — в лог.
   whisper-cli "${whisper_opts[@]}" -f "$DIR/$track.16k.wav" -of "$DIR/$track" > /dev/null
   echo "  готово за $(( $(date +%s) - start )) с"
   rm -f "$DIR/$track.16k.wav"
@@ -93,14 +117,17 @@ echo "  готово за $(( $(date +%s) - start )) с"
 # Битрейт выбирает afconvert под частоту/каналы дорожки.
 if [[ "${KEEP_RAW:-0}" != "1" ]]; then
   for track in mic system; do
-    [[ -f "$DIR/$track.caf" ]] || continue
-    echo "→ $track: сжимаю исходник в m4a"
-    if afconvert -f m4af -d aac "$DIR/$track.caf" "$DIR/$track.m4a.part"; then
-      mv "$DIR/$track.m4a.part" "$DIR/$track.m4a" && rm "$DIR/$track.caf"
-    else
-      rm -f "$DIR/$track.m4a.part"
-      echo "⚠️  не удалось сжать $track.caf — оставляю как есть"
-    fi
+    while IFS= read -r seg; do
+      [[ "$seg" == *.caf ]] || continue
+      out="${seg%.caf}.m4a"
+      echo "→ $(basename "$seg"): сжимаю в m4a"
+      if afconvert -f m4af -d aac "$seg" "$out.part"; then
+        mv "$out.part" "$out" && rm "$seg"
+      else
+        rm -f "$out.part"
+        echo "⚠️  не удалось сжать $(basename "$seg") — оставляю как есть"
+      fi
+    done < <(segments "$track")
   done
 fi
 
