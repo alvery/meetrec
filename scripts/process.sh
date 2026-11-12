@@ -16,6 +16,7 @@
 #                        промпт передаётся последним аргументом, транскрипт — в stdin
 #   KEEP_RAW=1           не сжимать исходные .caf
 #   MEETREC_REPORT_HOST  user@server — автоматически отправлять технический отчёт (см. report.sh)
+#   MEETREC_NOTES_HOST   user@server — писать заметки через claude -p на сервере (транскрипт уходит по SSH)
 set -euo pipefail
 
 DIR="${1:?usage: process.sh <meeting-dir>}"
@@ -41,6 +42,10 @@ fi
 MODEL="${WHISPER_MODEL:-$ROOT/models/ggml-large-v3-turbo.bin}"
 VAD_MODEL="${VAD_MODEL:-$ROOT/models/ggml-silero-v5.1.2.bin}"
 LANG_CODE="${WHISPER_LANG:-ru}"
+# Заметки: на сервере (MEETREC_NOTES_HOST), если задан; иначе локальный claude -p.
+if [[ -z "${NOTES_CMD:-}" && -n "${MEETREC_NOTES_HOST:-}" ]]; then
+  NOTES_CMD="$ROOT/scripts/remote_notes.sh"
+fi
 NOTES_CMD="${NOTES_CMD:-claude -p}"
 
 echo "=== process.sh $(date -u +%Y-%m-%dT%H:%M:%SZ), git $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"

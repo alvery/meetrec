@@ -71,6 +71,7 @@ swift build -c release      # бинарь: .build/release/rec
 | `WHISPER_LANG` | `ru` | `ru`, `en` или `auto` |
 | `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | любая ggml-модель whisper.cpp |
 | `VAD_MODEL` | `models/ggml-silero-v5.1.2.bin` | вырезает тишину, убирает галлюцинации whisper |
+| `MEETREC_NOTES_HOST` | — | `user@server`: заметки пишет `claude -p` **на сервере** (транскрипт уходит по SSH, там не сохраняется) |
 | `NOTES_CMD` | `claude -p` | shell-команда (кавычки работают): промпт последним аргументом, транскрипт в stdin |
 | `KEEP_RAW` | `0` | `1` — не сжимать исходные .caf в .m4a |
 
