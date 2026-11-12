@@ -567,6 +567,45 @@ final class SystemAudioRecorder {
     }
 }
 
+// MARK: - Разрешение на системный звук
+
+/// Разрешение «запись системного звука» (TCC kTCCServiceAudioCapture). Публичного API для
+/// проверки нет — как и Apple-пример AudioCap, используем TCC.framework через dlsym.
+/// Без разрешения process tap не падает, а молча отдаёт тишину.
+enum AudioCapturePermission {
+    private typealias PreflightFn = @convention(c) (CFString, CFDictionary?) -> Int
+    private typealias RequestFn = @convention(c) (CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void) -> Void
+    private static let service = "kTCCServiceAudioCapture" as CFString
+    private static let tcc = dlopen("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW)
+
+    /// "authorized" | "denied" | "unknown" | nil (TCC недоступен).
+    static func status() -> String? {
+        guard let tcc, let sym = dlsym(tcc, "TCCAccessPreflight") else { return nil }
+        switch unsafeBitCast(sym, to: PreflightFn.self)(service, nil) {
+        case 0: return "authorized"
+        case 1: return "denied"
+        default: return "unknown"
+        }
+    }
+
+    /// Показывает системный запрос (если macOS ещё не спрашивала) и ждёт ответа.
+    static func request() -> Bool? {
+        guard let tcc, let sym = dlsym(tcc, "TCCAccessRequest") else { return nil }
+        let sem = DispatchSemaphore(value: 0)
+        var granted = false
+        unsafeBitCast(sym, to: RequestFn.self)(service, nil) { granted = $0; sem.signal() }
+        sem.wait()
+        return granted
+    }
+
+    /// Приложение, которому macOS выдаёт разрешение: для CLI — терминал/IDE, из которого он запущен.
+    static func responsibleApp() -> String {
+        let env = ProcessInfo.processInfo.environment
+        let parts = [env["TERM_PROGRAM"], env["__CFBundleIdentifier"]].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? "?" : parts.joined(separator: " / ")
+    }
+}
+
 // MARK: - main
 
 func requestMicAccess() -> Bool {
@@ -628,6 +667,26 @@ func run() -> Never {
 
     guard requestMicAccess() else {
         fail("нет доступа к микрофону. Системные настройки → Конфиденциальность → Микрофон → включи свой терминал.")
+    }
+
+    let app = AudioCapturePermission.responsibleApp()
+    var permission = AudioCapturePermission.status()
+    log("🔐 системный звук: разрешение \(permission ?? "не проверить"), запущено из: \(app)", echo: false)
+    if permission == "unknown" {
+        print("🔐 macOS сейчас спросит разрешение на запись системного звука — разреши.")
+        let granted = AudioCapturePermission.request()
+        permission = AudioCapturePermission.status()
+        log("🔐 запрос разрешения: \(granted.map { $0 ? "выдано" : "отказано" } ?? "не удалось"), теперь \(permission ?? "?")", echo: false)
+    }
+    if permission == "denied" || permission == "unknown" {
+        print("""
+        ⚠️  Нет разрешения на запись системного звука — дорожка «они» будет тишиной.
+            Разрешение нужно приложению, из которого запущен rec: \(app)
+            Системные настройки → Конфиденциальность и безопасность → Запись экрана и системного звука →
+            «Только запись системного звука» → включи это приложение (или добавь через +), затем Cmd+Q по нему и запусти заново.
+            Сбросить решение и получить запрос снова: tccutil reset AudioCapture
+
+        """)
     }
 
     let mic = MicRecorder(dir: outDir)
