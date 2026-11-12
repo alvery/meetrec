@@ -130,8 +130,14 @@ echo "→ пишу заметки: $NOTES_CMD"
 # bash -c — чтобы NOTES_CMD мог содержать кавычки и аргументы с пробелами.
 # Пишем во временный файл: при ошибке не останется пустого notes.md.
 start=$(date +%s)
-bash -c "$NOTES_CMD \"\$1\"" notes "$(cat "$ROOT/prompts/notes.md")" \
-  < "$DIR/transcript.md" > "$DIR/notes.md.part"
+if ! bash -c "$NOTES_CMD \"\$1\"" notes "$(cat "$ROOT/prompts/notes.md")" \
+     < "$DIR/transcript.md" > "$DIR/notes.md.part"; then
+  # Некоторые CLI (claude -p) пишут ошибку в stdout — покажем её, иначе в логе пусто.
+  echo "❌ команда заметок завершилась с ошибкой. Её вывод (начало):"
+  head -c 500 "$DIR/notes.md.part"; echo
+  rm -f "$DIR/notes.md.part"
+  exit 1
+fi
 mv "$DIR/notes.md.part" "$DIR/notes.md"
 echo "  готово за $(( $(date +%s) - start )) с"
 
