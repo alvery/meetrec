@@ -13,17 +13,25 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 source "$ROOT/scripts/config.sh"
 
+# Сначала обновляемся: новые режимы (app и т.п.) появляются именно с обновлением.
+# Не удалось (нет сети, локальные правки) — не повод не записать встречу:
+# предупреждаем и собираем/запускаем то, что есть.
+if [[ -z "${MEETREC_DEV_PULLED:-}" ]]; then
+  before="$(git hash-object "$0" scripts/config.sh 2>/dev/null || true)"
+  echo "→ git pull"
+  if ! GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 pull --ff-only; then
+    echo "⚠️  git pull не удался — продолжаю с текущей версией кода"
+  fi
+  # Обновился сам dev.sh или config.sh — перезапускаемся новой версией (уже без pull).
+  if [[ "$(git hash-object "$0" scripts/config.sh 2>/dev/null || true)" != "$before" ]]; then
+    MEETREC_DEV_PULLED=1 exec "$0" "$@"
+  fi
+fi
+
 case "${1:-}" in
   ""|rec|app) ;;
   *) echo "usage: ./scripts/dev.sh [rec [папка] | app]"; exit 1 ;;
 esac
-
-# Не удалось обновиться (нет сети, локальные правки) — не повод не записать встречу:
-# предупреждаем и собираем/запускаем то, что есть.
-echo "→ git pull"
-if ! GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 pull --ff-only; then
-  echo "⚠️  git pull не удался — продолжаю с текущей версией кода"
-fi
 
 # Для rec собираем только CLI: ошибка в коде приложения не должна мешать записать встречу.
 product_args=()
