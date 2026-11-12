@@ -12,8 +12,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 source "$ROOT/scripts/config.sh"
 
+case "${1:-}" in
+  ""|rec) ;;
+  *) echo "usage: ./scripts/dev.sh [rec [папка]]"; exit 1 ;;
+esac
+
+# Не удалось обновиться (нет сети, локальные правки) — не повод не записать встречу:
+# предупреждаем и собираем/запускаем то, что есть.
 echo "→ git pull"
-git pull --ff-only
+if ! GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 pull --ff-only; then
+  echo "⚠️  git pull не удался — продолжаю с текущей версией кода"
+fi
 
 echo "→ swift build -c release"
 build_log="$(mktemp)"
@@ -31,12 +40,20 @@ if [[ $status -ne 0 ]]; then
     {
       echo "# build failed"
       echo
-      echo "- git: $(git rev-parse --short HEAD)"
+      echo "- git: $(git rev-parse --short HEAD), локальных изменений: $(git status --porcelain | wc -l | tr -d ' ')"
       echo "- macOS: $(sw_vers -productVersion 2>/dev/null || echo '?')"
       echo "- swift: $(swift --version 2>&1 | head -1)"
       echo
+      echo "## Ошибки"
+      echo
       echo '```'
-      tail -n 300 "$build_log"
+      grep -n 'error:' "$build_log" | head -n 50 || true
+      echo '```'
+      echo
+      echo "## Полный лог (первые 2000 строк)"
+      echo
+      echo '```'
+      head -n 2000 "$build_log"
       echo '```'
     } | ssh -o BatchMode=yes -o ConnectTimeout=10 "$MEETREC_REPORT_HOST" \
           "mkdir -p '$remote_dir' && cat > '$remote_dir/$name'" \
@@ -49,5 +66,7 @@ echo "✅ собрано: .build/release/rec"
 
 if [[ "${1:-}" == "rec" ]]; then
   shift
+  rm -f "$build_log"
+  trap - EXIT
   exec "$ROOT/.build/release/rec" "$@"
 fi
