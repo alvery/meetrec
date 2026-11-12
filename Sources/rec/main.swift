@@ -573,7 +573,7 @@ final class SystemAudioRecorder {
 /// проверки нет — как и Apple-пример AudioCap, используем TCC.framework через dlsym.
 /// Без разрешения process tap не падает, а молча отдаёт тишину.
 enum AudioCapturePermission {
-    private typealias PreflightFn = @convention(c) (CFString, CFDictionary?) -> Int
+    private typealias PreflightFn = @convention(c) (CFString, CFDictionary?) -> Int32 // C int
     private typealias RequestFn = @convention(c) (CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void) -> Void
     private static let service = "kTCCServiceAudioCapture" as CFString
     private static let tcc = dlopen("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW)
@@ -594,7 +594,8 @@ enum AudioCapturePermission {
         let sem = DispatchSemaphore(value: 0)
         var granted = false
         unsafeBitCast(sym, to: RequestFn.self)(service, nil) { granted = $0; sem.signal() }
-        sem.wait()
+        // Запрос может не показаться (запуск без GUI-сессии) — не висеть вечно.
+        guard sem.wait(timeout: .now() + 120) == .success else { return nil }
         return granted
     }
 
@@ -675,8 +676,13 @@ func run() -> Never {
     if permission == "unknown" {
         print("🔐 macOS сейчас спросит разрешение на запись системного звука — разреши.")
         let granted = AudioCapturePermission.request()
-        permission = AudioCapturePermission.status()
-        log("🔐 запрос разрешения: \(granted.map { $0 ? "выдано" : "отказано" } ?? "не удалось"), теперь \(permission ?? "?")", echo: false)
+        log("🔐 запрос разрешения: \(granted.map { $0 ? "выдано" : "отказано" } ?? "не удалось"), " +
+            "preflight теперь \(AudioCapturePermission.status() ?? "?")", echo: false)
+        switch granted {
+        case true?: permission = "authorized" // ответ пользователя важнее запоздалого кэша TCC
+        case false?: permission = "denied"
+        case nil: permission = nil            // спросить не удалось — не утверждаем, что доступа нет
+        }
     }
     if permission == "denied" || permission == "unknown" {
         print("""
