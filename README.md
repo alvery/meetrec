@@ -33,6 +33,16 @@ git clone https://github.com/alvery/meetrec.git && cd meetrec
 swift build -c release      # бинарь: .build/release/rec
 ```
 
+## Обновление и сборка
+
+```bash
+./scripts/dev.sh             # git pull + swift build
+./scripts/dev.sh rec         # то же + сразу запустить запись
+```
+
+Если сборка упала и настроен `MEETREC_REPORT_HOST` (см. «Отладочные отчёты»), лог ошибок
+сам уходит на сервер — Claude читает его оттуда.
+
 ## Использование
 
 ```bash
