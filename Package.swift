@@ -3,8 +3,10 @@ import PackageDescription
 
 let package = Package(
     name: "meetrec",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("14.2")], // Core Audio process taps
     targets: [
-        .executableTarget(name: "rec", path: "Sources/rec"),
+        .target(name: "RecorderKit", path: "Sources/RecorderKit"),
+        .executableTarget(name: "rec", dependencies: ["RecorderKit"], path: "Sources/rec"),
+        .executableTarget(name: "MeetrecApp", dependencies: ["RecorderKit"], path: "Sources/MeetrecApp"),
     ]
 )

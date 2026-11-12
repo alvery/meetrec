@@ -3,6 +3,7 @@
 #
 #   ./scripts/dev.sh               git pull + сборка
 #   ./scripts/dev.sh rec [папка]   то же + запустить rec
+#   ./scripts/dev.sh app           то же + собрать/переустановить/перезапустить meetrec.app
 #
 # Если сборка упала и задан MEETREC_REPORT_HOST — лог ошибок уходит на сервер
 # (в ту же папку, что и отчёты): достаточно написать Claude «посмотри репорты».
@@ -13,8 +14,8 @@ cd "$ROOT"
 source "$ROOT/scripts/config.sh"
 
 case "${1:-}" in
-  ""|rec) ;;
-  *) echo "usage: ./scripts/dev.sh [rec [папка]]"; exit 1 ;;
+  ""|rec|app) ;;
+  *) echo "usage: ./scripts/dev.sh [rec [папка] | app]"; exit 1 ;;
 esac
 
 # Не удалось обновиться (нет сети, локальные правки) — не повод не записать встречу:
@@ -63,6 +64,12 @@ if [[ $status -ne 0 ]]; then
   exit "$status"
 fi
 echo "✅ собрано: .build/release/rec"
+
+if [[ "${1:-}" == "app" ]]; then
+  rm -f "$build_log"
+  trap - EXIT
+  exec "$ROOT/scripts/build-app.sh"
+fi
 
 if [[ "${1:-}" == "rec" ]]; then
   shift
