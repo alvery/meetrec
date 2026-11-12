@@ -13,6 +13,7 @@ struct MeetingEvent: Identifiable, Equatable {
     func isInProgress(at now: Date = Date()) -> Bool { start <= now && now < end }
 }
 
+@MainActor
 final class CalendarService {
     private let store = EKEventStore()
     private(set) var authorized = false
@@ -24,15 +25,22 @@ final class CalendarService {
 
     /// Текущая (уже идущая) или ближайшая встреча в ближайшие 24 часа.
     /// Без весь-день-событий, отменённых и тех, от которых я отказался.
+    /// Из идущих — со ссылкой на созвон, затем начавшаяся позже всех: длинный блок
+    /// «Focus 13–17» не должен закрывать созвон в 14:00.
     func currentOrNext(now: Date = Date()) -> MeetingEvent? {
         guard authorized else { return nil }
         let predicate = store.predicateForEvents(withStart: now.addingTimeInterval(-12 * 3600),
                                                  end: now.addingTimeInterval(24 * 3600), calendars: nil)
-        return store.events(matching: predicate)
+        let events = store.events(matching: predicate)
             .filter { !$0.isAllDay && $0.endDate > now && $0.status != .canceled && !Self.declinedByMe($0) }
-            .sorted { $0.startDate < $1.startDate }
-            .first
             .map(Self.makeEvent)
+        let current = events.filter { $0.isInProgress(at: now) }
+            .sorted { a, b in
+                if (a.joinURL != nil) != (b.joinURL != nil) { return a.joinURL != nil }
+                return a.start > b.start
+            }
+        if let best = current.first { return best }
+        return events.filter { $0.start > now }.min { $0.start < $1.start }
     }
 
     private static func declinedByMe(_ e: EKEvent) -> Bool {

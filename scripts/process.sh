@@ -50,7 +50,14 @@ NOTES_CMD="${NOTES_CMD:-claude -p}"
 
 echo "=== process.sh $(date -u +%Y-%m-%dT%H:%M:%SZ), git $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
 # Промежуточные wav (~115 МБ/час каждый) удаляем при любом исходе; код выхода — в лог.
-trap 'status=$?; rm -f "$DIR"/*.16k.wav; echo "=== exit $status"' EXIT
+# Замок: одна обработка на папку (повторный запуск из приложения/терминала испортил бы файлы).
+# Остался после аварии (kill -9)? Удали каталог .processing в папке встречи.
+LOCK="$DIR/.processing"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "❌ $DIR уже обрабатывается (есть $LOCK). Если это ошибка — удали $LOCK"
+  exit 1
+fi
+trap 'status=$?; rm -f "$DIR"/*.16k.wav; rmdir "$LOCK" 2>/dev/null; echo "=== exit $status"' EXIT
 
 command -v whisper-cli >/dev/null || { echo "❌ whisper-cli не найден. Запусти ./scripts/setup.sh"; exit 1; }
 [[ -f "$MODEL" ]] || { echo "❌ Нет модели $MODEL. Запусти ./scripts/setup.sh"; exit 1; }

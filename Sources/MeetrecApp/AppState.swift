@@ -9,6 +9,8 @@ struct MeetingFolder: Identifiable, Equatable {
     let title: String
     let date: Date
     let hasNotes: Bool
+    /// process.sh держит этот каталог-замок, пока обрабатывает встречу (в т.ч. запущенный не нами).
+    var isProcessing: Bool { FileManager.default.fileExists(atPath: url.appendingPathComponent(".processing").path) }
     var id: URL { url }
     var notes: URL { url.appendingPathComponent("notes.md") }
 }
@@ -24,6 +26,7 @@ final class AppState: ObservableObject {
     @Published private(set) var levelMe: Float = 0
     @Published private(set) var levelThem: Float = 0
     @Published private(set) var recordingTitle: String?
+    @Published private(set) var recordingDir: URL?
     @Published var errorText: String?
     @Published var warningText: String?
 
@@ -114,6 +117,7 @@ final class AppState: ObservableObject {
             try rec.start()
             recording = rec
             recordingTitle = event?.title
+            recordingDir = dir
             isRecording = true
             elapsed = 0
             peakMe = 0; peakThem = 0; levelTicks = 0
@@ -148,6 +152,7 @@ final class AppState: ObservableObject {
         levelTimer = nil
         rec.stop(reason: reason)
         recording = nil
+        recordingDir = nil
         isRecording = false
         levelMe = 0; levelThem = 0
         let title = recordingTitle ?? rec.dir.lastPathComponent
@@ -158,7 +163,9 @@ final class AppState: ObservableObject {
     // MARK: - Обработка (scripts/process.sh из репозитория)
 
     func process(_ dir: URL, title: String) {
-        guard !processing.contains(dir) else { return }
+        guard !processing.contains(dir), dir != recordingDir,
+              !FileManager.default.fileExists(atPath: dir.appendingPathComponent(".processing").path)
+        else { return }
         guard let root = Bundle.main.object(forInfoDictionaryKey: "MeetrecRepoRoot") as? String else {
             Notifier.failed(title: "Обработка не запущена", body: "В Info.plist нет MeetrecRepoRoot — пересобери build-app.sh")
             return
@@ -240,10 +247,11 @@ final class AppState: ObservableObject {
 
     // MARK: - Вспомогательное
 
-    /// 2026-11-12-1400-sync-s-komandoy (или 2026-11-12-140312 без встречи).
+    /// 2026-11-12-140312-sync-s-komandoy (или 2026-11-12-140312 без встречи). С секундами —
+    /// чтобы повторный старт той же встречи (случайный «Стоп») не упёрся в занятую папку.
     static func folderName(for event: MeetingEvent?) -> String {
         let f = DateFormatter()
-        f.dateFormat = event == nil ? "yyyy-MM-dd-HHmmss" : "yyyy-MM-dd-HHmm"
+        f.dateFormat = "yyyy-MM-dd-HHmmss"
         let stamp = f.string(from: Date())
         guard let event else { return stamp }
         let latin = event.title.applyingTransform(.toLatin, reverse: false)?

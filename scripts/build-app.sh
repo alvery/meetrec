@@ -47,7 +47,13 @@ codesign --force --sign "$SIGN_ID" "$APP"
 
 DEST="$HOME/Applications/meetrec.app"
 mkdir -p "$HOME/Applications"
-pkill -x meetrec 2>/dev/null && sleep 1 || true
+# Закрываем штатно (applicationShouldTerminate остановит идущую запись и закроет файлы);
+# pkill — только если приложение не закрылось за 10 с.
+if pgrep -x meetrec >/dev/null; then
+  osascript -e 'tell application id "dev.meetrec.app" to quit' >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do pgrep -x meetrec >/dev/null || break; sleep 0.5; done
+  pkill -x meetrec 2>/dev/null && sleep 1 || true
+fi
 rm -rf "$DEST"
 ditto "$APP" "$DEST"
 open "$DEST"

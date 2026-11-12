@@ -25,11 +25,14 @@ if ! GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=1
   echo "⚠️  git pull не удался — продолжаю с текущей версией кода"
 fi
 
-echo "→ swift build -c release"
+# Для rec собираем только CLI: ошибка в коде приложения не должна мешать записать встречу.
+product_args=()
+if [[ "${1:-}" == "rec" ]]; then product_args=(--product rec); fi
+echo "→ swift build -c release ${product_args[*]:-}"
 build_log="$(mktemp)"
 trap 'rm -f "$build_log"' EXIT
 set +e
-swift build -c release 2>&1 | tee "$build_log"
+swift build -c release ${product_args[@]+"${product_args[@]}"} 2>&1 | tee "$build_log"
 status=${PIPESTATUS[0]}
 set -e
 

@@ -160,7 +160,9 @@ struct RecentSection: View {
                         Text(Format.day(m.date)).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if state.processing.contains(m.url) {
+                    if m.url == state.recordingDir {
+                        Label("запись", systemImage: "record.circle.fill").font(.caption).foregroundStyle(.red)
+                    } else if state.processing.contains(m.url) || m.isProcessing {
                         ProgressView().controlSize(.small).help("Обрабатывается")
                     } else if m.hasNotes {
                         Button { state.open(m.notes) } label: { Image(systemName: "doc.text") }

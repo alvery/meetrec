@@ -42,8 +42,11 @@ final class Log {
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }
-        handle = try? FileHandle(forWritingTo: url)
-        handle?.seekToEndOfFile()
+        lock.withLock {
+            try? handle?.close() // лог предыдущей записи (приложение живёт долго)
+            handle = try? FileHandle(forWritingTo: url)
+            handle?.seekToEndOfFile()
+        }
     }
 
     func write(_ message: String, echo: Bool) {
