@@ -49,9 +49,9 @@ enum Notifier {
              category: Category.prompt, info: ["eventID": event.id], sound: false)
     }
 
-    static func joinSoon(_ event: MeetingEvent) {
+    static func joinSoon(_ event: MeetingEvent, quiet: Bool) {
         post(title: event.title, body: "Через минуту", category: Category.join,
-             info: ["url": event.joinURL?.absoluteString ?? ""], sound: true)
+             info: ["url": event.joinURL?.absoluteString ?? ""], sound: !quiet)
     }
 
     static func notesReady(title: String, notes: URL, quiet: Bool) {

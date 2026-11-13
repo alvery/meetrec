@@ -25,7 +25,9 @@ final class CalendarService {
 
     /// Перепроверить доступ (пользователь мог включить его в Системных настройках без перезапуска).
     func refreshAuthorization() -> Bool {
-        authorized = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        let now = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        if now && !authorized { store.reset() } // доступ выдали на ходу — старый store может не видеть событий
+        authorized = now
         return authorized
     }
 

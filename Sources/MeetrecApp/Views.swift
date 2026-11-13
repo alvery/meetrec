@@ -77,6 +77,10 @@ struct ContentView: View {
         .padding(14)
         .frame(width: 340)
         .onAppear { state.popoverOpened() }
+        // MenuBarExtra не пересоздаёт содержимое между открытиями — onAppear бывает только первый раз.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            state.popoverOpened()
+        }
     }
 }
 

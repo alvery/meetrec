@@ -153,11 +153,12 @@ final class AppState: ObservableObject {
             promptEvent = nil
         }
 
-        // За минуту до встречи — напоминание с «Подключиться».
-        if let e = main, e.joinURL != nil, e.start > now, e.start.timeIntervalSince(now) <= 60,
-           !joinReminded.contains(e.id) {
+        // За минуту до встречи — напоминание с «Подключиться». Смотрим и следующую:
+        // при встречах подряд main — ещё идущая встреча.
+        for e in [main, following].compactMap({ $0 })
+        where e.joinURL != nil && e.start > now && e.start.timeIntervalSince(now) <= 60 && !joinReminded.contains(e.id) {
             joinReminded.insert(e.id)
-            Notifier.joinSoon(e)
+            Notifier.joinSoon(e, quiet: isRecording)
         }
 
         // Встреча идёт и Zoom/Meet занял микрофон — предложить запись (один раз на встречу).
@@ -170,20 +171,24 @@ final class AppState: ObservableObject {
             Notifier.meetingStarted(e)
         }
 
-        refreshMeetings()
-        refreshPermissions()
+        // Диск читаем часто, только пока что-то пишется или обрабатывается; иначе — при открытии окна.
+        if isRecording || !started.isEmpty || processingMeeting != nil { refreshMeetings() }
     }
 
-    /// Окно открыли: всё актуализировать, «!» в метке погасить.
+    /// Окно открыли: всё актуализировать (диск, разрешения), «!» в метке погасить.
     func popoverOpened() {
         unseenFailure = false
         tick()
+        refreshMeetings()
+        refreshPermissions()
     }
 
     func refreshPermissions() {
         var missing: [Permission] = []
         if AVCaptureDevice.authorizationStatus(for: .audio) == .denied { missing.append(.microphone) }
-        if Recording.audioCapturePermissionStatus() == "denied" || audioPermissionWarned { missing.append(.systemAudio) }
+        let audio = Recording.audioCapturePermissionStatus()
+        if audio == "authorized" { audioPermissionWarned = false } // выдали в Настройках — предупреждение снять
+        if audio == "denied" || audioPermissionWarned { missing.append(.systemAudio) }
         if !calendar.refreshAuthorization(), EKEventStore.authorizationStatus(for: .event) != .notDetermined {
             missing.append(.calendar)
         }
@@ -348,8 +353,9 @@ final class AppState: ObservableObject {
         if started.contains(dir) || fm.fileExists(atPath: dir.appendingPathComponent(".processing").path) {
             return .processing(stage: log.stage)
         }
-        if let code = log.exitCode, code != 0 { return .failed }
+        // Есть заметки — встреча «готова», даже если последний повтор обработки упал.
         if fm.fileExists(atPath: dir.appendingPathComponent("notes.md").path) { return .done }
+        if let code = log.exitCode, code != 0 { return .failed }
         return .pending
     }
 
@@ -364,7 +370,7 @@ final class AppState: ObservableObject {
         var stage: String?
         for line in tail.split(separator: "\n") {
             if line.hasPrefix("=== exit ") { exitCode = Int32(line.dropFirst(9).trimmingCharacters(in: .whitespaces)) }
-            if line.hasPrefix("=== process.sh") { exitCode = nil } // начался новый прогон
+            if line.hasPrefix("=== process.sh") { exitCode = nil; stage = nil } // начался новый прогон
             if line.hasPrefix("→ ") { stage = String(line.dropFirst(2)) }
         }
         return (exitCode, stage)
