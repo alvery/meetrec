@@ -22,8 +22,7 @@ private struct GeneralSettings: View {
     @EnvironmentObject var state: AppState
     @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .icon
     @AppStorage(Hotkey.modeKey) private var hotkeyMode: HotkeyMode = .off
-    @State private var axTrusted = Hotkey.accessibilityTrusted
-    private let axCheck = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    @ObservedObject private var hotkey = Hotkey.shared
 
     var body: some View {
         Form {
@@ -50,7 +49,7 @@ private struct GeneralSettings: View {
                 if hotkeyMode == .combo {
                     LabeledContent("Сочетание") { ShortcutRecorder() }
                 }
-                if hotkeyMode.modifier != nil && !axTrusted {
+                if hotkeyMode.modifier != nil && !hotkey.trusted {
                     HStack(alignment: .firstTextBaseline) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                         Text("Нужен «Универсальный доступ» для meetrec — иначе двойное нажатие не сработает.")
@@ -69,13 +68,6 @@ private struct GeneralSettings: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             .onChange(of: hotkeyMode) { Hotkey.shared.apply() }
-            .onReceive(axCheck) { _ in
-                let trusted = Hotkey.accessibilityTrusted
-                if trusted != axTrusted {
-                    axTrusted = trusted
-                    Hotkey.shared.apply() // монитор нажатий заработает только после выдачи доступа
-                }
-            }
             Section {
                 Picker("В строке меню", selection: $labelMode) {
                     ForEach(LabelMode.allCases) { Text($0.title).tag($0) }
@@ -115,7 +107,7 @@ private struct ShortcutRecorder: View {
 
     var body: some View {
         HStack {
-            Text(listening ? "Нажми сочетание… (⎋ — отмена)" : (display.isEmpty ? "Не задано" : display))
+            Text(listening ? "Нажми сочетание с ⌃ или ⌥… (⎋ — отмена)" : (display.isEmpty ? "Не задано" : display))
                 .font(.system(.body, design: .rounded).weight(listening ? .regular : .semibold))
                 .foregroundStyle(listening ? Color.accentColor : (display.isEmpty ? .secondary : .primary))
             Button(listening ? "Отмена" : "Задать…") { listening ? stop() : start() }
@@ -125,11 +117,14 @@ private struct ShortcutRecorder: View {
 
     private func start() {
         listening = true
+        Hotkey.shared.suspend() // иначе текущее сочетание сработает вместо записи нового
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
             if e.keyCode == 53 { stop(); return nil } // ⎋
             let mods = e.modifierFlags.intersection([.command, .option, .control, .shift])
-            guard !mods.intersection([.command, .option, .control]).isEmpty else {
-                NSSound.beep() // без ⌘/⌥/⌃ сочетание будет мешать обычному набору текста
+            // Нужен ⌃ или ⌥: сочетания только с ⌘ (⌘C, ⌘V, ⌘Q…) заняты системой и приложениями,
+            // а глобальная регистрация отобрала бы их у всех.
+            guard !mods.intersection([.option, .control]).isEmpty else {
+                NSSound.beep()
                 return nil
             }
             let d = UserDefaults.standard
@@ -137,15 +132,16 @@ private struct ShortcutRecorder: View {
             d.set(Int(mods.rawValue), forKey: Hotkey.modifiersKey)
             display = Hotkey.display(keyCode: e.keyCode, modifiers: mods, characters: e.charactersIgnoringModifiers)
             stop()
-            Hotkey.shared.apply()
             return nil
         }
     }
 
     private func stop() {
+        let wasListening = listening
         listening = false
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
+        if wasListening { Hotkey.shared.apply() } // вернуть (новое или прежнее) сочетание
     }
 }
 

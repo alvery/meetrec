@@ -189,6 +189,9 @@ struct EventHero: View {
 
 struct RecordButton: View {
     @EnvironmentObject var state: AppState
+    // Подписка на настройки клавиши — чтобы подсказка обновлялась сразу.
+    @AppStorage(Hotkey.modeKey) private var hotkeyMode = ""
+    @AppStorage(Hotkey.displayKey) private var hotkeyDisplay = ""
     let event: MeetingEvent?
 
     var body: some View {
@@ -205,6 +208,8 @@ struct RecordButton: View {
 
 struct RecordingHero: View {
     @EnvironmentObject var state: AppState
+    @AppStorage(Hotkey.modeKey) private var hotkeyMode = ""
+    @AppStorage(Hotkey.displayKey) private var hotkeyDisplay = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

@@ -205,6 +205,7 @@ final class AppState: ObservableObject {
         updatePanel()
 
         if unseenNotes, let since = unseenNotesSince, now.timeIntervalSince(since) > 900 { unseenNotes = false }
+        Hotkey.shared.refreshTrust() // «Универсальный доступ» могли выдать при закрытых настройках
 
         // Диск читаем часто, только пока что-то пишется или обрабатывается; иначе — при открытии окна.
         if isRecording || !started.isEmpty || processingMeeting != nil { refreshMeetings() }
@@ -217,6 +218,7 @@ final class AppState: ObservableObject {
         tick()
         refreshMeetings()
         refreshPermissions()
+        Hotkey.shared.refreshTrust()
     }
 
     func refreshPermissions() {

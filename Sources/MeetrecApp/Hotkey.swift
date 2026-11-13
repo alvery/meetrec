@@ -20,6 +20,16 @@ enum HotkeyMode: String, CaseIterable, Identifiable {
         }
     }
 
+    var symbol: String? {
+        switch self {
+        case .doubleCommand: return "⌘"
+        case .doubleOption: return "⌥"
+        case .doubleControl: return "⌃"
+        case .doubleShift: return "⇧"
+        case .off, .combo: return nil
+        }
+    }
+
     var modifier: NSEvent.ModifierFlags? {
         switch self {
         case .doubleCommand: return .command
@@ -36,16 +46,16 @@ enum HotkeyMode: String, CaseIterable, Identifiable {
         switch mode {
         case .off: return nil
         case .combo: return defaults.string(forKey: Hotkey.displayKey)
-        default:
-            let s = mode.title.components(separatedBy: " ").last ?? ""
-            return s + s
+        default: return mode.symbol.map { $0 + $0 }
         }
     }
 }
 
 @MainActor
-final class Hotkey {
+final class Hotkey: ObservableObject {
     static let shared = Hotkey()
+    /// «Универсальный доступ» выдан (перепроверяется в AppState.tick, раз в 5 с).
+    @Published private(set) var trusted = AXIsProcessTrusted()
     static let modeKey = "hotkeyMode"
     static let keyCodeKey = "hotkeyKeyCode"
     static let modifiersKey = "hotkeyModifiers"
@@ -61,6 +71,7 @@ final class Hotkey {
     private var downAt: TimeInterval = 0
     private var lastTapAt: TimeInterval = 0
     private var interrupted = false
+    private var tapApp: pid_t = 0 // приложение в момент первого нажатия
 
     /// Для двойного нажатия: есть ли «Универсальный доступ».
     static var accessibilityTrusted: Bool { AXIsProcessTrusted() }
@@ -69,6 +80,18 @@ final class Hotkey {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
     }
+
+    /// Доступ выдали/отозвали — переустановить мониторы (они работают только с доступом).
+    func refreshTrust() {
+        let now = AXIsProcessTrusted()
+        if now != trusted {
+            trusted = now
+            apply()
+        }
+    }
+
+    /// Пока в настройках записывается новое сочетание — старое не должно срабатывать.
+    func suspend() { uninstall() }
 
     /// (Пере)установить по текущим настройкам. Вызывать при запуске и после изменения настроек.
     func apply() {
@@ -93,7 +116,9 @@ final class Hotkey {
         target = flag
         isDown = false
         lastTapAt = 0
-        let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown]
+        // Клики и прокрутка с зажатым модификатором (⌘-клик, ⇧-клик) — тоже «не нажатие».
+        let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown,
+                                           .otherMouseDown, .scrollWheel]
         if let m = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] e in
             MainActor.assumeIsolated { self?.handle(e) }
         }) { monitors.append(m) }
@@ -103,30 +128,32 @@ final class Hotkey {
         }) { monitors.append(m) }
     }
 
-    /// Нажатие = модификатор нажат один и отпущен быстро, без других клавиш между; два таких подряд за 0,4 с.
+    /// Нажатие = модификатор нажат из «ничего не зажато», отпущен быстро (< 0,25 с), между — ни клавиш,
+    /// ни кликов, ни других модификаторов. Два таких подряд за 0,4 с в одном и том же приложении
+    /// (⌘Tab ⌘Tab меняет приложение — это не наше нажатие).
     private func handle(_ e: NSEvent) {
-        if e.type == .keyDown { // печатают с модификатором — это не «двойное нажатие»
+        guard e.type == .flagsChanged else { // клавиша / клик / прокрутка — это не «двойное нажатие»
             interrupted = true
             lastTapAt = 0
             return
         }
         let flags = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
-        if flags == target {
+        if flags == target, !isDown, !interrupted {
             isDown = true
-            interrupted = false
             downAt = e.timestamp
-        } else if flags.isEmpty, isDown {
-            isDown = false
-            guard !interrupted, e.timestamp - downAt < 0.3 else { lastTapAt = 0; return }
-            if e.timestamp - lastTapAt < 0.4 {
+        } else if flags.isEmpty {
+            defer { isDown = false; interrupted = false } // всё отпущено — следующее нажатие с чистого листа
+            guard isDown, !interrupted, e.timestamp - downAt < 0.25 else { lastTapAt = 0; return }
+            let app = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+            if lastTapAt > 0, e.timestamp - lastTapAt < 0.4, app == tapApp {
                 lastTapAt = 0
                 fire()
             } else {
                 lastTapAt = e.timestamp
+                tapApp = app
             }
-        } else { // зажали другой модификатор вместе с нашим
-            isDown = false
+        } else { // другой модификатор (вместе с нашим или вместо) — до полного отпускания не считаем
             interrupted = true
             lastTapAt = 0
         }
@@ -136,10 +163,14 @@ final class Hotkey {
 
     private func installCombo(keyCode: UInt32, modifiers: NSEvent.ModifierFlags) {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
+        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
             DispatchQueue.main.async { MainActor.assumeIsolated { Hotkey.shared.fire() } }
             return noErr
         }, 1, &spec, nil, &handlerRef)
+        guard installed == noErr else {
+            AppState.shared.errorText = "Горячая клавиша не установилась (код \(installed))."
+            return
+        }
         let id = EventHotKeyID(signature: OSType(0x4D54_5243), id: 1) // 'MTRC'
         let status = RegisterEventHotKey(keyCode, Self.carbonModifiers(modifiers), id,
                                          GetApplicationEventTarget(), 0, &hotKeyRef)
@@ -171,8 +202,17 @@ final class Hotkey {
         if modifiers.contains(.option) { s += "⌥" }
         if modifiers.contains(.shift) { s += "⇧" }
         if modifiers.contains(.command) { s += "⌘" }
-        let special: [UInt16: String] = [49: "Пробел", 36: "↩", 53: "⎋", 51: "⌫", 48: "⇥",
-                                         123: "←", 124: "→", 125: "↓", 126: "↑"]
-        return s + (special[keyCode] ?? (characters ?? "?").uppercased())
+        // Подпись по физической клавише (US-раскладка), как регистрирует Carbon: на русской
+        // раскладке ⌃⌥R не превратится в «⌃⌥К», ⇧1 — в «!».
+        let keys: [UInt16: String] = [
+            0: "A", 11: "B", 8: "C", 2: "D", 14: "E", 3: "F", 5: "G", 4: "H", 34: "I", 38: "J", 40: "K",
+            37: "L", 46: "M", 45: "N", 31: "O", 35: "P", 12: "Q", 15: "R", 1: "S", 17: "T", 32: "U",
+            9: "V", 13: "W", 7: "X", 16: "Y", 6: "Z",
+            29: "0", 18: "1", 19: "2", 20: "3", 21: "4", 23: "5", 22: "6", 26: "7", 28: "8", 25: "9",
+            49: "Пробел", 36: "↩", 53: "⎋", 51: "⌫", 48: "⇥", 123: "←", 124: "→", 125: "↓", 126: "↑",
+            122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8",
+            101: "F9", 109: "F10", 103: "F11", 111: "F12",
+        ]
+        return s + (keys[keyCode] ?? (characters ?? "?").uppercased())
     }
 }
