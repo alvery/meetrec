@@ -18,8 +18,6 @@ struct MeetrecApp: App {
 
 // MARK: - Метка в строке меню
 
-/// Метка по фазам: запись → «Записать?» → обработка → ошибка → встреча идёт → скоро → простой.
-/// В строке меню она монохромная (template), поэтому фазы различаются формой символа и текстом.
 /// Что показывать в строке меню рядом с иконкой. По умолчанию — только иконка: на MacBook с вырезом
 /// macOS молча прячет иконки, которые не влезли слева от него, и длинная метка пропадает целиком.
 enum LabelMode: String, CaseIterable, Identifiable {
@@ -37,19 +35,21 @@ enum LabelMode: String, CaseIterable, Identifiable {
 
 struct MenuBarLabel: View {
     @ObservedObject var state: AppState
+    @ObservedObject private var blinker = Blinker.shared
     @AppStorage(LabelMode.storageKey) private var mode: LabelMode = .icon
 
     var body: some View {
         let c = content
         HStack(spacing: 3) {
-            Image(nsImage: MenuIcon.image(c.icon))
+            Image(nsImage: MenuIcon.image(c.icon)).renderingMode(.template)
             if mode != .icon, let text = c.text { Text(text).monospacedDigit() }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("meetrec, " + c.a11y)
     }
 
-    /// Иконка по фазе (приоритет сверху вниз) + необязательный текст для режимов «время» / «название и время».
+    /// Иконка по фазе, приоритет сверху вниз: запись → «Записать?» → обработка → ошибка →
+    /// встреча идёт / скоро → ✓ → простой. Текст — только в режимах «время» / «название и время».
     private var content: (icon: IconState, text: String?, a11y: String) {
         _ = state.minuteTick // перерисовка раз в минуту
         let now = Date()
@@ -57,10 +57,9 @@ struct MenuBarLabel: View {
             let t = Format.timer(state.elapsedSeconds)
             return (.recording, t, "идёт запись \(t)")
         }
-        if state.promptEvent != nil { return (.prompt(blink: state.blink), "Записать?", "встреча идёт, записать?") }
+        if state.promptEvent != nil { return (.prompt(blink: blinker.on), "Записать?", "встреча идёт, записать?") }
         if let p = state.processingMeeting { return (.processing, nil, "делаю заметки: \(p.title)") }
         if state.unseenFailure { return (.failed, nil, "не удалось сделать заметки") }
-        if state.unseenNotes { return (.done, nil, "заметки готовы") }
         if let e = state.event {
             let prefix = mode == .titleAndTime ? "\(Format.short(e.title)) · " : ""
             if e.isInProgress(at: now) {
@@ -72,11 +71,12 @@ struct MenuBarLabel: View {
             }
             let until = e.start.timeIntervalSince(now)
             if until <= 3600 {
-                let step = Int(((1 - until / 3600) * Double(IconState.steps)).rounded(.down))
+                let step = Int(((1 - until / 3600) * Double(IconState.steps)).rounded(.up)) // за ≤ 2,5 мин — полное кольцо
                 return (.soon(step: min(IconState.steps, max(1, step))), "\(prefix)\(Format.compact(until))",
                         "\(e.title) через \(Format.minutes(until))")
             }
         }
+        if state.unseenNotes { return (.done, nil, "заметки готовы") }
         return (.idle, nil, "нет встреч в ближайший час")
     }
 }

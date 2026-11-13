@@ -81,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             switch content.categoryIdentifier {
             case Notifier.Category.notes where isDefault:
                 if let path = info["path"] as? String { state.open(URL(fileURLWithPath: path)) }
+                state.notesSeen()
             case Notifier.Category.failed:
                 guard let path = info["dir"] as? String else { break }
                 let dir = URL(fileURLWithPath: path)

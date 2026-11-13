@@ -55,6 +55,14 @@ final class Meter: ObservableObject {
     }
 }
 
+/// Фаза мигания точки «Записать?» — отдельный объект: его слушает только иконка,
+/// а не всё окно (мигание идёт во время созвона).
+@MainActor
+final class Blinker: ObservableObject {
+    static let shared = Blinker()
+    @Published var on = true
+}
+
 // MARK: - Разрешения
 
 enum Permission: String, Identifiable, CaseIterable {
@@ -109,10 +117,9 @@ final class AppState: ObservableObject {
     @Published private(set) var meetings: [MeetingFolder] = []
     /// Обработка упала, а окно с тех пор не открывали — «!» в иконке.
     @Published private(set) var unseenFailure = false
-    /// Заметки готовы, а окно с тех пор не открывали — «✓» в иконке.
+    /// Заметки готовы, а окно/заметки с тех пор не открывали — «✓» в иконке (гаснет и сам через 15 мин).
     @Published private(set) var unseenNotes = false
-    /// Мигание точки «Записать?» в иконке (таймер работает только пока висит подсказка).
-    @Published private(set) var blink = true
+    private var unseenNotesSince: Date?
     private var blinkTimer: Timer?
 
     let meetingsRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Meetings")
@@ -181,6 +188,8 @@ final class AppState: ObservableObject {
         }
         updatePanel()
 
+        if unseenNotes, let since = unseenNotesSince, now.timeIntervalSince(since) > 900 { unseenNotes = false }
+
         // Диск читаем часто, только пока что-то пишется или обрабатывается; иначе — при открытии окна.
         if isRecording || !started.isEmpty || processingMeeting != nil { refreshMeetings() }
     }
@@ -229,14 +238,25 @@ final class AppState: ObservableObject {
     private func updateBlink() {
         let needed = promptEvent != nil && !isRecording && !isStarting
         if needed, blinkTimer == nil {
-            blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { _ in
-                Task { @MainActor in AppState.shared.blink.toggle() }
+            let t = Timer(timeInterval: 0.7, repeats: true) { _ in
+                Task { @MainActor in Blinker.shared.on.toggle() }
             }
+            t.tolerance = 0.1
+            RunLoop.main.add(t, forMode: .common) // мигать и при открытом меню
+            blinkTimer = t
         } else if !needed, let t = blinkTimer {
             t.invalidate()
             blinkTimer = nil
-            blink = true
+            Blinker.shared.on = true
         }
+    }
+
+    /// Пользователь сам открыл заметки (из уведомления) — «✓» больше не нужен.
+    func notesSeen() { unseenNotes = false }
+
+    /// Окно meetrec сейчас перед глазами — тогда «✓ / !» в иконке не нужны.
+    private var windowVisible: Bool {
+        NSApp.windows.contains { $0.isKeyWindow && $0.isVisible && !($0 is NSPanel) }
     }
 
     func dismissJoin() {
@@ -365,10 +385,12 @@ final class AppState: ObservableObject {
                 state.started.remove(dir)
                 state.refreshMeetings()
                 if ok {
-                    state.unseenNotes = true
+                    state.unseenFailure = false
+                    if !state.windowVisible { state.unseenNotes = true; state.unseenNotesSince = Date() }
                     Notifier.notesReady(title: title, notes: dir.appendingPathComponent("notes.md"), quiet: state.isRecording)
                 } else {
-                    state.unseenFailure = true
+                    state.unseenNotes = false
+                    if !state.windowVisible { state.unseenFailure = true }
                     Notifier.failed(title: title, dir: dir, quiet: state.isRecording)
                 }
             }
