@@ -142,7 +142,7 @@ python3 "$ROOT/scripts/merge.py" "$DIR/mic.json" "$DIR/system.json" > "$DIR/tran
 
 # Действия (заметки, action items, outline… — настраиваются в приложении): параллельно,
 # каждое — свой .md в папке встречи. Упавшее действие не мешает сжатию; код выхода — в конце.
-echo "→ действия над транскриптом: $NOTES_CMD"
+echo "→ действия над транскриптом"
 start=$(date +%s)
 actions_status=0
 python3 "$ROOT/scripts/run_actions.py" "$DIR" "${MEETREC_ACTIONS:-$HOME/.config/meetrec/actions.json}" "$NOTES_CMD" \

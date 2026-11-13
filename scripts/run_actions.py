@@ -15,6 +15,18 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+
+# Шлюз агента (OpenAI-совместимый: meetrec-gateway через SSH-туннель, Ollama, LiteLLM, OpenRouter…).
+# Задан — действия идут через него; иначе — через notes-cmd (claude -p / remote_notes.sh).
+GATEWAY_URL = os.environ.get("MEETREC_GATEWAY_URL", "").rstrip("/")
+GATEWAY_SSH = os.environ.get("MEETREC_GATEWAY_SSH", "")
+GATEWAY_PORT = os.environ.get("MEETREC_GATEWAY_PORT", "8787")
+GATEWAY_TOKEN = os.environ.get("MEETREC_GATEWAY_TOKEN", "")
+GATEWAY_MODEL = os.environ.get("MEETREC_GATEWAY_MODEL", "") or "default"
+if GATEWAY_SSH and not GATEWAY_URL:
+    GATEWAY_URL = f"http://127.0.0.1:{GATEWAY_PORT}/v1"
 
 RESERVED = {"transcript.md", "meta.md", "mic.json", "system.json", "process.log", "rec.log", "results.json"}
 MANIFEST = "results.json"  # что получилось в этом прогоне — его читает приложение
@@ -54,8 +66,39 @@ def run(action, out, cmd, stdin, meeting_dir):
         return action.get("name", "?"), out, False, f"{type(e).__name__}: {e}", 0.0
 
 
+def ask_gateway(prompt, text, model):
+    """POST /chat/completions → (ok, текст ответа или сообщение об ошибке)."""
+    body = json.dumps({"model": model, "messages": [
+        {"role": "system", "content": prompt}, {"role": "user", "content": text}]}).encode("utf-8")
+    req = urllib.request.Request(GATEWAY_URL + "/chat/completions", data=body, method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": f"Bearer {GATEWAY_TOKEN}"})
+    try:
+        with urllib.request.urlopen(req, timeout=900) as resp:
+            data = json.load(resp)
+        return True, data["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.load(e).get("error", {}).get("message", "")
+        except Exception:
+            msg = ""
+        return False, f"шлюз HTTP {e.code}: {msg}"[:400]
+    except Exception as e:
+        return False, f"шлюз: {type(e).__name__}: {e}"[:400]
+
+
 def _run(action, out, cmd, stdin, meeting_dir):
     started = time.time()
+    if GATEWAY_URL:
+        ok, result = ask_gateway(action.get("prompt", ""), stdin, action.get("model") or GATEWAY_MODEL)
+        took = time.time() - started
+        if not ok:
+            return action.get("name", "?"), out, False, result, took
+        tmp = os.path.join(meeting_dir, out + ".part")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(result)
+        os.replace(tmp, os.path.join(meeting_dir, out))
+        return action.get("name", "?"), out, True, "", took
     proc = subprocess.run(["bash", "-c", cmd + ' "$1"', "action", action.get("prompt", "")],
                           input=stdin.encode("utf-8"), capture_output=True)
     took = time.time() - started
@@ -77,7 +120,15 @@ def main():
     meeting_dir, actions_path, cmd = sys.argv[1:]
     actions, source = load_actions(actions_path)
     enabled = [a for a in actions if a.get("enabled", True) and (a.get("prompt") or "").strip()]
-    print(f"  действий: {len(enabled)} (из {os.path.basename(source)})")
+    print(f"  действий: {len(enabled)} (из {os.path.basename(source)}); "
+          + (f"через шлюз {GATEWAY_URL}, модель по умолчанию {GATEWAY_MODEL}" if GATEWAY_URL else f"через {cmd}"))
+    if GATEWAY_URL and GATEWAY_SSH:
+        tunnel = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel.sh")
+        t = subprocess.run(["bash", tunnel], capture_output=True, text=True)
+        if t.returncode != 0:
+            print(f"  ❌ SSH-туннель к шлюзу не поднялся: {(t.stderr or t.stdout).strip()[:300]}")
+            write_manifest(meeting_dir, [])
+            return 1
     if not enabled:
         write_manifest(meeting_dir, [])
         return 0

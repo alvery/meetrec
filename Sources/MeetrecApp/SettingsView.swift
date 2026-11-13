@@ -9,6 +9,8 @@ struct SettingsView: View {
                 .tabItem { Label("Основные", systemImage: "gearshape") }
             ActionsSettings()
                 .tabItem { Label("Действия", systemImage: "sparkles") }
+            GatewaySettings()
+                .tabItem { Label("Агент", systemImage: "network") }
         }
         .frame(width: 760, height: 520)
         // Приложение без Dock-иконки: окно настроек (в т.ч. по ⌘,) должно выйти поверх остальных.
@@ -217,12 +219,28 @@ private struct ActionsSettings: View {
 
 private struct ActionEditor: View {
     @Binding var action: MeetingAction
+    @ObservedObject private var gateway = GatewayStore.shared
+
+    /// Модели шлюза + текущая модель действия (если её нет в списке — не теряем).
+    private var modelChoices: [String] {
+        var list = gateway.models
+        if let m = action.model, !list.contains(m) { list.append(m) }
+        return list
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Form {
                 TextField("Название", text: $action.name)
                 TextField("Файл результата", text: $action.output)
+                Picker("Модель", selection: Binding(get: { action.model ?? "" },
+                                                     set: { action.model = $0.isEmpty ? nil : $0 })) {
+                    Text(gateway.model.isEmpty ? "По умолчанию" : "По умолчанию (\(gateway.model))").tag("")
+                    ForEach(modelChoices, id: \.self) { Text($0).tag($0) }
+                }
+                .disabled(!gateway.isConfigured)
+                .help(gateway.isConfigured ? "Модель шлюза для этого действия"
+                                           : "Выбор модели — через шлюз (вкладка «Агент»)")
                 Toggle("Выполнять после транскрипции", isOn: $action.enabled)
             }
             .formStyle(.columns)
@@ -233,9 +251,85 @@ private struct ActionEditor: View {
                 .padding(6)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.3)))
-            Text("К промпту автоматически добавляются: кто есть «Я» и «Они», meta.md (название, время, участники) и транскрипт. Результат пишется на языке встречи. Действия выполняются параллельно через claude -p на сервере.")
+            Text("К промпту автоматически добавляются: кто есть «Я» и «Они», meta.md (название, время, участники) и транскрипт. Результат пишется на языке встречи. Действия выполняются параллельно — через шлюз агента (вкладка «Агент») или claude -p по SSH.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
+    }
+}
+
+// MARK: - Агент (шлюз)
+
+private struct GatewaySettings: View {
+    @ObservedObject private var gw = GatewayStore.shared
+    @State private var showToken = false
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("SSH-туннель к", text: $gw.ssh, prompt: Text("user@server"))
+                TextField("Порт шлюза", text: $gw.port)
+                TextField("Свой адрес API", text: $gw.address, prompt: Text(gw.ssh.isEmpty ? "https://host:port/v1" : "http://127.0.0.1:\(gw.port)/v1"))
+                LabeledContent("Токен") {
+                    HStack {
+                        if showToken { TextField("", text: $gw.token).labelsHidden() }
+                        else { SecureField("", text: $gw.token).labelsHidden() }
+                        Button { showToken.toggle() } label: { Image(systemName: showToken ? "eye.slash" : "eye") }
+                            .buttonStyle(.borderless).accessibilityLabel(showToken ? "Скрыть токен" : "Показать токен")
+                        Button("С сервера") { Task { await gw.fetchToken() } }
+                            .disabled(gw.ssh.isEmpty)
+                            .help("Забрать токен meetrec-gateway по SSH")
+                    }
+                }
+                Picker("Модель по умолчанию", selection: $gw.model) {
+                    Text("Решает шлюз").tag("")
+                    ForEach(gw.models + (gw.model.isEmpty || gw.models.contains(gw.model) ? [] : [gw.model]), id: \.self) {
+                        Text($0).tag($0)
+                    }
+                }
+            } header: {
+                Text("Шлюз агента")
+            } footer: {
+                Text("Любой OpenAI-совместимый API (/v1/models, /v1/chat/completions): meetrec-gateway на сервере (за ним claude -p по подписке), Ollama, LM Studio, LiteLLM, OpenRouter… С «SSH-туннелем» meetrec сам поднимает туннель тем же ключом, что и для отчётов, — на сервере наружу ничего не открыто. Пусто — действия идут через claude -p по SSH, как раньше.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                HStack {
+                    Button {
+                        Task { await gw.check() }
+                    } label: {
+                        Label(gw.checking ? "Проверяю…" : "Проверить", systemImage: "checkmark.seal")
+                    }
+                    .disabled(gw.checking)
+                    if gw.isConfigured {
+                        Text(gw.effectiveURL).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                ForEach(gw.steps) { step in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        switch step.state {
+                        case .running: ProgressView().controlSize(.small)
+                        case .ok: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(step.title)
+                            if !step.detail.isEmpty {
+                                Text(step.detail).font(.caption).foregroundStyle(.secondary)
+                                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                if let err = gw.saveError { Text(err).font(.caption).foregroundStyle(.red) }
+            } header: {
+                Text("Проверка")
+            } footer: {
+                Text("Три шага: туннель поднят → шлюз принимает токен и отдаёт модели → модель отвечает на короткий запрос.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }

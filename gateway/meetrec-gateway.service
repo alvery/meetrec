@@ -1,0 +1,11 @@
+[Unit]
+Description=meetrec gateway (OpenAI-compatible -> claude -p), localhost only
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/meetrec-gateway
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

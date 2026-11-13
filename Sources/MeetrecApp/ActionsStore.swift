@@ -8,9 +8,11 @@ struct MeetingAction: Codable, Identifiable, Equatable {
     var enabled: Bool
     var output: String
     var prompt: String
+    /// Модель шлюза для этого действия; nil — модель шлюза по умолчанию.
+    var model: String?
 
-    init(id: String, name: String, enabled: Bool, output: String, prompt: String) {
-        (self.id, self.name, self.enabled, self.output, self.prompt) = (id, name, enabled, output, prompt)
+    init(id: String, name: String, enabled: Bool, output: String, prompt: String, model: String? = nil) {
+        (self.id, self.name, self.enabled, self.output, self.prompt, self.model) = (id, name, enabled, output, prompt, model)
     }
 
     /// Терпимо к файлу, написанному руками: id/enabled/output необязательны (как и для run_actions.py).
@@ -21,6 +23,7 @@ struct MeetingAction: Codable, Identifiable, Equatable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         output = try c.decodeIfPresent(String.self, forKey: .output) ?? ""
         prompt = try c.decodeIfPresent(String.self, forKey: .prompt) ?? ""
+        model = try c.decodeIfPresent(String.self, forKey: .model).flatMap { $0.isEmpty ? nil : $0 }
     }
 }
 
