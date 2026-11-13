@@ -8,12 +8,17 @@ enum IconState: Hashable {
     case soon(step: Int)      // встреча ≤ 60 мин: дуга заполняется по часовой (0…steps)
     case now(step: Int)       // встреча идёт: сектор оставшегося времени тает (0…steps)
     case prompt(blink: Bool)  // «Записать?»: мигающая точка
-    case recording            // сплошная точка
+    case recording(step: Int?, late: Bool) // красная точка; кольцо — остаток встречи (nil — без встречи),
+                                           // late — ≤ 5 мин до конца или уже дольше: кольцо жёлтое
+    case marked               // ★ — метка поставлена (на секунду)
     case processing           // три точки
     case done                 // ✓ — заметки готовы, окно ещё не открывали
     case failed               // ! — обработка упала
 
     static let steps = 24     // шаг дуги ≈ 2,5 мин на часе — перерисовка не чаще раза в минуту
+
+    /// Цветная (не template): запись видно издалека, а жёлтое кольцо — «пора закругляться».
+    var isColored: Bool { if case .recording = self { return true } else { return false } }
 }
 
 @MainActor
@@ -27,7 +32,7 @@ enum MenuIcon {
         renderer.scale = 2
         let image = renderer.nsImage ?? NSImage(size: NSSize(width: 18, height: 18))
         image.size = NSSize(width: 18, height: 18)
-        image.isTemplate = state != .recording // запись — красная, остальное красит macOS
+        image.isTemplate = !state.isColored // запись — цветная, остальное красит macOS
         cache[state] = image
         return image
     }
@@ -42,7 +47,8 @@ private struct IconGlyph: View {
             let rect = CGRect(origin: .zero, size: size).insetBy(dx: lw / 2 + 0.6, dy: lw / 2 + 0.6)
             let c = CGPoint(x: rect.midX, y: rect.midY)
             let r = rect.width / 2
-            let ink = state == .recording ? Color(red: 1, green: 0.23, blue: 0.19) : Color.black
+            let red = Color(red: 1, green: 0.23, blue: 0.19)
+            var ink = state.isColored ? red : Color.black
 
             func ring(_ opacity: Double) {
                 ctx.stroke(Path(ellipseIn: rect), with: .color(ink.opacity(opacity)), lineWidth: lw)
@@ -84,8 +90,21 @@ private struct IconGlyph: View {
                 ring(1); pie(Double(step) / Double(IconState.steps))
             case .prompt(let blink):
                 ring(1); dot(r * 0.45, blink ? 1 : 0.3)
-            case .recording:
-                ring(1); dot(r * 0.55)
+            case .recording(let step, let late):
+                if late { ink = Color(red: 1, green: 0.72, blue: 0) }
+                if let step { ring(0.35); arc(Double(step) / Double(IconState.steps)) } else { ring(1) }
+                ink = red
+                dot(r * 0.5)
+            case .marked:
+                var p = Path() // пятиконечная звезда
+                for i in 0..<10 {
+                    let a = Double(i) * .pi / 5 - .pi / 2
+                    let rr = i % 2 == 0 ? r : r * 0.45
+                    let pt = CGPoint(x: c.x + rr * CGFloat(cos(a)), y: c.y + rr * CGFloat(sin(a)))
+                    if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                }
+                p.closeSubpath()
+                ctx.fill(p, with: .color(ink))
             case .processing:
                 ring(0.45)
                 for dx in [-2.6, 0, 2.6] as [CGFloat] {

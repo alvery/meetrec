@@ -48,6 +48,8 @@ PREAMBLE = """Below are the meeting metadata (if any) and an automatic transcrip
 «Я» is me (my microphone). «Они» are the other participants (system audio; individual speakers are not \
 separated — infer who is speaking from context and the participant list). The transcript is machine-generated \
 and may contain recognition errors, especially in names and technical terms — infer by meaning.
+Lines «★ Отметка» mark moments I flagged as important during the meeting — give what was said around them \
+special attention.
 Write the result in the language the meeting was held in. Output only Markdown, without any preamble.
 """
 

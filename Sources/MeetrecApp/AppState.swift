@@ -117,6 +117,14 @@ enum Permission: String, Identifiable, CaseIterable {
 
 // MARK: - Состояние приложения
 
+/// Сводка с прошлой встречи той же серии / с теми же людьми — на плашке «Подключиться» и в карточке.
+struct Briefing: Equatable {
+    let eventID: String
+    let date: Date
+    let items: [String] // первые задачи из action-items прошлой встречи (может быть пусто)
+    let file: URL       // что открыть по клику: задачи, иначе главный результат
+}
+
 /// Подсказка «Остановить запись?»: созвон закончился / началась следующая встреча.
 struct StopSuggestion: Equatable {
     let key: String       // причина; закрытую ✕ больше не показываем в этой записи
@@ -146,6 +154,17 @@ final class AppState: ObservableObject {
     @Published private(set) var stopSuggestion: StopSuggestion?
     /// Микрофон занят созвоном (Zoom/Meet/…) — значит, уже подключился.
     @Published private(set) var callActive = false
+    /// Микрофон и выход звука — проверка на плашке «Подключиться» (снимается при её показе).
+    @Published private(set) var joinRoute: AudioRoute?
+    /// Сводка с прошлой встречи: для карточки (ищется в фоне) и для плашки (снимается до её показа — под неё размер).
+    @Published private(set) var eventBriefing: Briefing?
+    @Published private(set) var joinBriefing: Briefing?
+    /// ★ Метки во время записи: сколько поставлено, вспышка в иконке, работает ли ⌃⌥M.
+    @Published private(set) var marksCount = 0
+    @Published private(set) var markFlash = false
+    @Published private(set) var markHotkeyOK = true
+    /// Встреча, которую сейчас пишем (для кольца-остатка в иконке и подсказки «Остановить?»).
+    @Published private(set) var recordingEvent: MeetingEvent?
     /// Меняется раз в минуту — чтобы обратный отсчёт в метке и окне не застывал.
     @Published private(set) var minuteTick = 0
 
@@ -182,7 +201,6 @@ final class AppState: ObservableObject {
     private var started: Set<URL> = [] // обработки, запущенные приложением (до появления замка на диске)
     private var audioPermissionWarned = false
     // Для подсказки «Остановить?»
-    private var recordingEvent: MeetingEvent?
     private var recordingStartedAt: Date?
     private var callSeenWhileRecording = false
     private var callIdleSince: Date?
@@ -220,6 +238,7 @@ final class AppState: ObservableObject {
         let now = Date()
         assign(\.minuteTick, Int(now.timeIntervalSince1970 / 60))
         let (main, following) = calendar.upcoming(now: now)
+        if main?.id != event?.id { refreshBriefing(for: main) }
         assign(\.event, main)
         assign(\.followingEvent, following)
 
@@ -233,6 +252,8 @@ final class AppState: ObservableObject {
         for e in [main, following].compactMap({ $0 })
         where e.joinURL != nil && e.start > now && e.start.timeIntervalSince(now) <= 60 && !joinReminded.contains(e.id) {
             joinReminded.insert(e.id)
+            joinRoute = currentAudioRoute()
+            joinBriefing = Self.findBriefing(for: e, in: meetingsRoot, excluding: recordingDir) // раз на встречу
             joinPanelEvent = e
         }
         if let j = joinPanelEvent, now > j.start.addingTimeInterval(180) { joinPanelEvent = nil }
@@ -264,6 +285,7 @@ final class AppState: ObservableObject {
 
     /// Окно открыли: всё актуализировать (диск, разрешения), «!» в метке погасить.
     func popoverOpened() {
+        refreshBriefing(for: event) // могли появиться новые заметки
         unseenFailure = false
         unseenNotes = false
         tick()
@@ -436,6 +458,8 @@ final class AppState: ObservableObject {
             callIdleSince = nil
             stopDismissed = []
             stopSuggestion = nil
+            marksCount = 0
+            markHotkeyOK = Hotkey.shared.registerMark()
             isRecording = true
             elapsedSeconds = 0
             Meter.shared.reset()
@@ -463,6 +487,114 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// ★ Отметить важный момент: секунды от начала записи → marks.txt; merge.py вставит метку в транскрипт.
+    func addMark() {
+        guard let rec = recording, let dir = recordingDir else { return }
+        let line = String(format: "%.1f\n", rec.elapsed)
+        let url = dir.appendingPathComponent("marks.txt")
+        if let h = try? FileHandle(forWritingTo: url) { // throwing-API: полный диск не роняет приложение
+            _ = try? h.seekToEnd(); try? h.write(contentsOf: Data(line.utf8)); try? h.close()
+        } else {
+            try? line.write(to: url, atomically: true, encoding: .utf8)
+        }
+        marksCount += 1
+        markFlash = true // подтверждение без звука (звук попал бы в запись)
+        markFlashTask?.cancel() // быстрая серия меток — звезда горит от последней
+        markFlashTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard !Task.isCancelled else { return }
+            AppState.shared.markFlash = false
+        }
+    }
+
+    // MARK: - Сводка с прошлой встречи
+
+    private var markFlashTask: Task<Void, Never>?
+    private var briefingTask: Task<Void, Never>?
+
+    /// Сводка для карточки — в фоне (чтение до 300 папок не должно тормозить окно).
+    func refreshBriefing(for event: MeetingEvent?) {
+        briefingTask?.cancel()
+        guard let event else { eventBriefing = nil; return }
+        let root = meetingsRoot, exclude = recordingDir
+        briefingTask = Task.detached(priority: .utility) {
+            let b = AppState.findBriefing(for: event, in: root, excluding: exclude)
+            await MainActor.run {
+                guard !Task.isCancelled, AppState.shared.event?.id == event.id || AppState.shared.event == nil else { return }
+                AppState.shared.assign(\.eventBriefing, b)
+            }
+        }
+    }
+
+    /// Последняя обработанная встреча с тем же названием, иначе — где есть хотя бы половина тех же людей
+    /// (без себя). Только чтение meta.md и файлов результатов, без AI.
+    nonisolated static func findBriefing(for event: MeetingEvent, in root: URL, excluding: URL?) -> Briefing? {
+        let fm = FileManager.default
+        // Имена папок начинаются с даты-времени — сортировка по имени = по времени.
+        let dirs = ((try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? [])
+            .filter { $0.standardizedFileURL != excluding?.standardizedFileURL }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .prefix(300)
+        func norm(_ s: String) -> String { s.trimmingCharacters(in: .whitespaces).lowercased() }
+        // «Встреча» — заглушка для событий без названия: по ней не сопоставляем.
+        let wanted = event.title == "Встреча" ? nil : norm(event.title)
+        let people = Set(event.attendees.map(norm))
+        for dir in dirs {
+            guard let meta = try? String(contentsOf: dir.appendingPathComponent("meta.md"), encoding: .utf8) else { continue }
+            let lines = meta.split(separator: "\n").map(String.init)
+            let sameTitle = wanted != nil && norm(title(of: dir)) == wanted
+            var samePeople = false
+            if !people.isEmpty, let line = lines.first(where: { $0.hasPrefix("- Участники: ") }) {
+                let theirs = Set(line.dropFirst("- Участники: ".count).split(separator: ",").map { norm(String($0)) })
+                let common = people.intersection(theirs).count
+                samePeople = common >= 1 && common * 2 >= people.count
+            }
+            guard sameTitle || samePeople else { continue }
+            let found = Self.results(in: dir)
+            guard !found.isEmpty else { continue } // не обработана — ничего не расскажет
+            let date = Format.folderStamp.date(from: String(dir.lastPathComponent.prefix(17))) ?? .distantPast
+            if let tasks = found.first(where: { $0.lastPathComponent.hasPrefix("action-items") }) {
+                return Briefing(eventID: event.id, date: date, items: taskLines(tasks), file: tasks)
+            }
+            return Briefing(eventID: event.id, date: date, items: [], file: found[0])
+        }
+        return nil
+    }
+
+    /// Первые задачи из action-items.md: строки таблицы (первая колонка), «Task: …» или пункты списка.
+    nonisolated static func taskLines(_ url: URL, limit: Int = 2) -> [String] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        var items: [String] = []
+        var taskColumn = 0 // колонка «Task / Задача» из шапки таблицы (бывает «# | Task | …»)
+        for raw in text.split(separator: "\n") {
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("|") {
+                let cells = line.split(separator: "|", omittingEmptySubsequences: false).dropFirst()
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                let plain = cells.map { $0.replacingOccurrences(of: "*", with: "").lowercased() }
+                if let i = plain.firstIndex(where: { $0 == "task" || $0 == "задача" }) { taskColumn = i; continue } // шапка
+                guard taskColumn < cells.count else { continue }
+                let cell = cells[taskColumn]
+                if cell.isEmpty || cell.allSatisfy({ "-: ".contains($0) }) { continue } // разделитель
+                line = cell
+            } else if let r = line.range(of: #"^([-*•]|\d+\.)\s+(\[[ xX]\]\s*)?"#, options: .regularExpression) {
+                line = String(line[r.upperBound...])
+                let plain = line.lowercased().replacingOccurrences(of: "*", with: "")
+                if plain.hasPrefix("assignee") || plain.hasPrefix("due") || plain.hasPrefix("исполнитель")
+                    || plain.hasPrefix("срок") { continue }
+            } else {
+                continue
+            }
+            line = line.replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: #"^(Task|Задача):\s*"#, with: "", options: [.regularExpression, .caseInsensitive])
+                .replacingOccurrences(of: #"\s*\[?\d{1,2}:\d{2}(:\d{2})?\]?\s*$"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+            if !line.isEmpty { items.append(line) }
+            if items.count == limit { break }
+        }
+        return items
+    }
+
     /// Горячая клавиша: старт (с привязкой к идущей встрече) или стоп.
     func toggleRecording() {
         if isRecording {
@@ -486,6 +618,7 @@ final class AppState: ObservableObject {
         recordingTitle = nil
         recordingEvent = nil
         stopSuggestion = nil
+        Hotkey.shared.unregisterMark()
         updatePanel()
         process(rec.dir, title: title)
     }
@@ -522,6 +655,7 @@ final class AppState: ObservableObject {
                 let state = AppState.shared
                 state.started.remove(dir)
                 state.refreshMeetings()
+                state.refreshBriefing(for: state.event)
                 let m = Self.manifest(in: dir)
                 let error = Self.logInfo(dir).error
                 // Часть действий выполнилась в этом прогоне — это «готово с оговоркой», а не ошибка:
@@ -588,10 +722,10 @@ final class AppState: ObservableObject {
 
     /// Результаты действий из results.json, который пишет run_actions.py (имена файлов — уже
     /// нормализованные скриптом). Встречи, обработанные до действий, — notes.md.
-    static func results(in dir: URL) -> [URL] { manifest(in: dir).ok }
+    nonisolated static func results(in dir: URL) -> [URL] { manifest(in: dir).ok }
 
     /// results.json: готовые файлы и названия невыполненных действий.
-    static func manifest(in dir: URL) -> (ok: [URL], failed: [String]) {
+    nonisolated static func manifest(in dir: URL) -> (ok: [URL], failed: [String]) {
         let fm = FileManager.default
         struct Manifest: Decodable {
             struct Item: Decodable { let name: String?; let file: String; let ok: Bool }
@@ -685,7 +819,7 @@ final class AppState: ObservableObject {
     }
 
     /// Название встречи: первая строка meta.md («# …»), иначе «Запись без встречи».
-    static func title(of dir: URL) -> String {
+    nonisolated static func title(of dir: URL) -> String {
         if let meta = try? String(contentsOf: dir.appendingPathComponent("meta.md"), encoding: .utf8),
            let first = meta.split(separator: "\n").first, first.hasPrefix("# ") {
             return String(first.dropFirst(2))

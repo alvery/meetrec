@@ -46,7 +46,7 @@ struct MenuBarLabel: View {
         let c = content
         HStack(spacing: 3) {
             // Запись — красным (не template): видно издалека и на демонстрации, что запись идёт.
-            Image(nsImage: MenuIcon.image(c.icon)).renderingMode(c.icon == .recording ? .original : .template)
+            Image(nsImage: MenuIcon.image(c.icon)).renderingMode(c.icon.isColored ? .original : .template)
             if mode != .icon, let text = c.text { Text(text).monospacedDigit() }
         }
         .accessibilityElement(children: .ignore)
@@ -60,7 +60,17 @@ struct MenuBarLabel: View {
         let now = Date()
         if state.isRecording {
             let t = Format.timer(state.elapsedSeconds)
-            return (.recording, t, "идёт запись \(t)")
+            if state.markFlash { return (.marked, t, "метка поставлена") }
+            // Кольцо — сколько осталось от встречи по календарю; за 5 минут до конца — жёлтое.
+            var step: Int?
+            var late = false
+            if let e = state.recordingEvent {
+                let left = e.end.timeIntervalSince(now)
+                let duration = max(60, e.end.timeIntervalSince(e.start))
+                step = min(IconState.steps, max(0, Int((left / duration * Double(IconState.steps)).rounded(.up))))
+                late = left <= 300
+            }
+            return (.recording(step: step, late: late), t, late ? "идёт запись \(t), встреча заканчивается" : "идёт запись \(t)")
         }
         if state.promptEvent != nil { return (.prompt(blink: blinker.on), "Записать?", "встреча идёт, записать?") }
         if let p = state.processingMeeting { return (.processing, nil, "делаю заметки: \(p.title)") }
@@ -181,6 +191,7 @@ struct EventHero: View {
                         Button("Не записывать") { state.dismissPrompt() }.buttonStyle(.link).font(.caption)
                     }
                 }
+                if !inProgress, let b = state.eventBriefing { BriefingView(briefing: b) }
                 if let f = state.followingEvent {
                     Text("Далее: \(f.title) · \(Format.time.string(from: f.start))")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -210,6 +221,29 @@ struct RecordButton: View {
     }
 }
 
+/// «С прошлой встречи (12 ноя): • задача • задача» — клик открывает задачи / заметки.
+struct BriefingView: View {
+    @EnvironmentObject var state: AppState
+    let briefing: Briefing
+
+    var body: some View {
+        Button { state.open(briefing.file) } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(briefing.items.isEmpty ? "Заметки прошлой встречи · \(Format.dayShort(briefing.date))"
+                                            : "С прошлой встречи · \(Format.dayShort(briefing.date))")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(briefing.items, id: \.self) { item in
+                    Text("• " + item).font(.caption).lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Открыть \(briefing.file.lastPathComponent)")
+    }
+}
+
 // MARK: - Главный блок: запись
 
 struct RecordingHero: View {
@@ -227,12 +261,20 @@ struct RecordingHero: View {
             .accessibilityElement(children: .combine)
             Text(state.recordingTitle ?? "Запись без встречи").font(.title3.weight(.semibold)).lineLimit(2)
             LevelsView()
-            Button { state.stopRecording() } label: {
-                Label("Остановить и сделать заметки", systemImage: "stop.fill").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
+            HStack(spacing: 8) {
+                Button { state.addMark() } label: {
+                    Label(state.marksCount > 0 ? "Метка · \(state.marksCount)" : "Метка", systemImage: "star")
+                }
+                .help(state.markHotkeyOK ? "Отметить важный момент (\(Hotkey.markDisplay) из любого приложения)"
+                      : Hotkey.markCollidesWithMain ? "Отметить важный момент (\(Hotkey.markDisplay) — это твоя клавиша старт/стоп)"
+                      : "Отметить важный момент (\(Hotkey.markDisplay) занято другим приложением)")
+                Button { state.stopRecording() } label: {
+                    Label("Остановить и сделать заметки", systemImage: "stop.fill").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
             .keyboardShortcut(".", modifiers: .command)
-            .help("Остановить (⌘." + (HotkeyMode.currentHint().map { "; из любого приложения — \($0)" } ?? "") + ")")
+                .help("Остановить (⌘." + (HotkeyMode.currentHint().map { "; из любого приложения — \($0)" } ?? "") + ")")
+            }
             .padding(.top, 2)
         }
     }
@@ -495,6 +537,12 @@ enum Format {
     }
 
     static func day(_ d: Date) -> String { dayFormatter.string(from: d) }
+
+    static let dayShortFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "d MMM"; return f
+    }()
+    /// «12 нояб.»
+    static func dayShort(_ d: Date) -> String { dayShortFormatter.string(from: d) }
 
     /// Название для строки меню: она общая с другими иконками, длинное — обрезаем.
     /// Для строки меню: «23 мин», «1ч23».

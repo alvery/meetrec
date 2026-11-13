@@ -165,3 +165,39 @@ public func otherProcessUsingInput() -> Bool {
     }
     return false
 }
+
+/// Куда пойдёт звук созвона: микрофон и выход по умолчанию — для проверки перед подключением.
+public struct AudioRoute: Equatable {
+    public let input: String
+    public let output: String
+    /// Bluetooth-микрофон (AirPods): в созвоне наушники уйдут в режим гарнитуры — звук хуже.
+    public let inputBluetooth: Bool
+    /// У микрофона выключен звук (аппаратный mute) — тебя не услышат.
+    public let inputMuted: Bool
+}
+
+public func currentAudioRoute() -> AudioRoute? {
+    func device(_ selector: AudioObjectPropertySelector) -> AudioDeviceID? {
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var addr = Devices.address(selector)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr,
+              id != kAudioObjectUnknown else { return nil }
+        return id
+    }
+    func uint(_ id: AudioDeviceID, _ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope) -> UInt32? {
+        var addr = Devices.address(selector, scope)
+        guard AudioObjectHasProperty(id, &addr) else { return nil }
+        var value = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr ? value : nil
+    }
+    guard let input = device(kAudioHardwarePropertyDefaultInputDevice),
+          let output = device(kAudioHardwarePropertyDefaultOutputDevice) else { return nil }
+    let transport = uint(input, kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal)
+    return AudioRoute(
+        input: (try? Devices.string(input, kAudioObjectPropertyName)) ?? "?",
+        output: (try? Devices.string(output, kAudioObjectPropertyName)) ?? "?",
+        inputBluetooth: transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE,
+        inputMuted: uint(input, kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput) == 1)
+}

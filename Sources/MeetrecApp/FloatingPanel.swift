@@ -1,4 +1,5 @@
 import AppKit
+import RecorderKit
 import SwiftUI
 
 /// Что показывает плашка.
@@ -69,6 +70,24 @@ final class ClickThroughHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+/// «🎤 MacBook Pro · 🎧 AirPods» + предупреждение, если с микрофоном что-то не так.
+struct RouteLine: View {
+    let route: AudioRoute
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("🎤 \(route.input) · 🎧 \(route.output)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            if route.inputMuted {
+                Label("Микрофон выключен — тебя не услышат", systemImage: "mic.slash.fill")
+                    .font(.caption).foregroundStyle(.red)
+            } else if route.inputBluetooth {
+                Label("Bluetooth-микрофон: звук в наушниках станет хуже (режим гарнитуры)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).lineLimit(2)
+            }
+        }
+    }
+}
+
 struct PanelView: View {
     @EnvironmentObject var state: AppState
     let kind: PanelKind
@@ -79,6 +98,10 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(headline).font(.headline).lineLimit(1)
                 Text(subtitle).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                if case .join(let e) = kind {
+                    if let route = state.joinRoute { RouteLine(route: route) }
+                    if let b = state.joinBriefing, b.eventID == e.id { BriefingView(briefing: b).padding(.top, 2) }
+                }
             }
             Spacer(minLength: 8)
             switch kind {

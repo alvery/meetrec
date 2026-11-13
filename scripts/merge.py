@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Склеивает две дорожки whisper.cpp (-oj) в один транскрипт с метками «Я» / «Они».
 
-Использование: merge.py mic.json system.json > transcript.md
+Использование: merge.py mic.json system.json [marks.txt] > transcript.md
+  marks.txt — метки важных моментов (секунды от начала записи, по одной на строку), ставятся горячей клавишей.
 """
 import json
 import re
@@ -49,16 +50,31 @@ def load(path, speaker):
     return segments
 
 
+def load_marks(path):
+    marks = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    marks.append((int(float(line.strip()) * 1000), "★", ""))
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        pass
+    return marks
+
+
 def ts(ms):
     s = ms // 1000
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
 def main():
-    if len(sys.argv) != 3:
-        sys.exit("usage: merge.py mic.json system.json")
+    if len(sys.argv) not in (3, 4):
+        sys.exit("usage: merge.py mic.json system.json [marks.txt]")
     me, them = load(sys.argv[1], "Я"), load(sys.argv[2], "Они")
-    segments = sorted(me + them, key=lambda s: s[0])
+    marks = load_marks(sys.argv[3]) if len(sys.argv) == 4 else []
+    segments = sorted(me + them + marks, key=lambda s: s[0])
     # Статистика — в stderr (попадает в process.log), сам текст — только в stdout/файл.
     print(f"  сегментов: Я {len(me)}, Они {len(them)}; отфильтровано: служебных меток "
           f"{FILTERED['non_speech']}, галлюцинаций {FILTERED['hallucination']}", file=sys.stderr)
@@ -67,7 +83,10 @@ def main():
     print("_«Я» — мой микрофон, «Они» — собеседники (системный звук)._\n")
     last_speaker = None
     for start, speaker, text in segments:
-        if speaker == last_speaker:
+        if speaker == "★":
+            print(f"\n**[{ts(start)}] ★ Отметка: важный момент**")
+            last_speaker = None  # следующая реплика — с новой строки и меткой времени
+        elif speaker == last_speaker:
             print(text)  # продолжение реплики того же спикера
         else:
             print(f"\n**[{ts(start)}] {speaker}:** {text}")

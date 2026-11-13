@@ -145,7 +145,8 @@ for track in mic system; do
 done
 
 echo "→ склеиваю дорожки"
-python3 "$ROOT/scripts/merge.py" "$DIR/mic.json" "$DIR/system.json" > "$DIR/transcript.md"
+marks=(); [[ -f "$DIR/marks.txt" ]] && marks=("$DIR/marks.txt") # ★ — важные моменты, отмеченные во время записи
+python3 "$ROOT/scripts/merge.py" "$DIR/mic.json" "$DIR/system.json" ${marks[@]+"${marks[@]}"} > "$DIR/transcript.md"
 fi # ACTIONS_ONLY
 
 # Действия (заметки, action items, outline… — настраиваются в приложении): параллельно,

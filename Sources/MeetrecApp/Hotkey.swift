@@ -63,7 +63,19 @@ final class Hotkey: ObservableObject {
 
     private var monitors: [Any] = []
     private var hotKeyRef: EventHotKeyRef?
-    private var handlerRef: EventHandlerRef?
+    private var markRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef? // ставится один раз и живёт всё время работы приложения
+
+    /// ★ Метка важного момента — ⌃⌥M, только пока идёт запись (в остальное время сочетание свободно).
+    static let markDisplay = "⌃⌥M"
+    private static let markID: UInt32 = 2
+    static var markCollidesWithMain: Bool {
+        let d = UserDefaults.standard
+        return d.string(forKey: modeKey) == HotkeyMode.combo.rawValue && d.object(forKey: keyCodeKey) != nil
+            && d.integer(forKey: keyCodeKey) == kVK_ANSI_M
+            && NSEvent.ModifierFlags(rawValue: UInt(d.integer(forKey: modifiersKey)))
+                .intersection([.command, .option, .control, .shift]) == [.control, .option]
+    }
 
     // Состояние распознавания двойного нажатия.
     private var target: NSEvent.ModifierFlags = []
@@ -161,16 +173,44 @@ final class Hotkey: ObservableObject {
 
     // MARK: - Сочетание клавиш (Carbon)
 
-    private func installCombo(keyCode: UInt32, modifiers: NSEvent.ModifierFlags) {
+    /// Один обработчик Carbon на все сочетания; какое нажато — по id.
+    private func ensureHandler() -> Bool {
+        if handlerRef != nil { return true }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
-            DispatchQueue.main.async { MainActor.assumeIsolated { Hotkey.shared.fire() } }
+        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            var hk = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                              nil, MemoryLayout<EventHotKeyID>.size, nil, &hk)
+            let id = hk.id
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if id == Hotkey.markID { AppState.shared.addMark() } else { Hotkey.shared.fire() }
+                }
+            }
             return noErr
         }, 1, &spec, nil, &handlerRef)
-        guard installed == noErr else {
-            AppState.shared.errorText = "Горячая клавиша не установилась (код \(installed))."
-            return
-        }
+        if installed != noErr { AppState.shared.errorText = "Горячая клавиша не установилась (код \(installed))." }
+        return installed == noErr
+    }
+
+    /// Включить ⌃⌥M на время записи. false — сочетание занято другим приложением.
+    @discardableResult
+    func registerMark() -> Bool {
+        guard markRef == nil else { return true }
+        // ⌃⌥M уже основная клавиша старт/стоп — метку не вешаем (иначе «метка» остановила бы запись).
+        if Self.markCollidesWithMain { return false }
+        guard ensureHandler() else { return false }
+        let id = EventHotKeyID(signature: OSType(0x4D54_5243), id: Self.markID)
+        return RegisterEventHotKey(UInt32(kVK_ANSI_M), UInt32(controlKey | optionKey), id,
+                                   GetApplicationEventTarget(), 0, &markRef) == noErr
+    }
+
+    func unregisterMark() {
+        if let ref = markRef { UnregisterEventHotKey(ref); markRef = nil }
+    }
+
+    private func installCombo(keyCode: UInt32, modifiers: NSEvent.ModifierFlags) {
+        guard ensureHandler() else { return }
         let id = EventHotKeyID(signature: OSType(0x4D54_5243), id: 1) // 'MTRC'
         let status = RegisterEventHotKey(keyCode, Self.carbonModifiers(modifiers), id,
                                          GetApplicationEventTarget(), 0, &hotKeyRef)
@@ -183,7 +223,6 @@ final class Hotkey: ObservableObject {
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
         if let ref = hotKeyRef { UnregisterEventHotKey(ref); hotKeyRef = nil }
-        if let h = handlerRef { RemoveEventHandler(h); handlerRef = nil }
     }
 
     static func carbonModifiers(_ f: NSEvent.ModifierFlags) -> UInt32 {

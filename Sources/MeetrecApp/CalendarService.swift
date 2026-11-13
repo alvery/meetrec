@@ -68,7 +68,8 @@ final class CalendarService {
     }
 
     private static func makeEvent(_ e: EKEvent) -> MeetingEvent {
-        let attendees = (e.attendees ?? []).compactMap { p -> String? in
+        // Без себя: в карточке, meta.md и сводке «с прошлой встречи» важны другие участники.
+        let attendees = (e.attendees ?? []).filter { !$0.isCurrentUser }.compactMap { p -> String? in
             if let name = p.name, !name.isEmpty { return name }
             let s = p.url.absoluteString
             return s.hasPrefix("mailto:") ? String(s.dropFirst(7)) : nil
