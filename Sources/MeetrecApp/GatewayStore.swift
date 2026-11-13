@@ -35,7 +35,17 @@ final class GatewayStore: ObservableObject {
     var effectiveURL: String {
         let a = address.trimmingCharacters(in: .whitespaces)
         if !a.isEmpty { return a.hasSuffix("/") ? String(a.dropLast()) : a }
-        return ssh.trimmingCharacters(in: .whitespaces).isEmpty ? "" : "http://127.0.0.1:\(port)/v1"
+        return usesTunnel ? "http://127.0.0.1:\(effectivePort)/v1" : ""
+    }
+
+    /// Туннель — только когда свой адрес не задан.
+    var usesTunnel: Bool {
+        !ssh.trimmingCharacters(in: .whitespaces).isEmpty && address.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    var effectivePort: String {
+        let p = port.trimmingCharacters(in: .whitespaces)
+        return p.isEmpty ? "8787" : p
     }
 
     var isConfigured: Bool { !effectiveURL.isEmpty }
@@ -83,10 +93,13 @@ final class GatewayStore: ObservableObject {
         let text = "# Пишет meetrec (Настройки → Агент). Читают process.sh / run_actions.py.\n" +
             zip(Self.keys, values).map { "\($0)=\"\($1)\"" }.joined(separator: "\n") + "\n"
         do {
+            // Временный файл сразу с правами 600 и атомарная замена: токен ни на миг не читаем другим.
             let fm = FileManager.default
             try fm.createDirectory(at: Self.fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try text.write(to: Self.fileURL, atomically: true, encoding: .utf8)
-            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.fileURL.path) // там токен
+            let tmp = Self.fileURL.path + ".part"
+            guard fm.createFile(atPath: tmp, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600]),
+                  rename(tmp, Self.fileURL.path) == 0
+            else { throw CocoaError(.fileWriteUnknown) }
             saveError = nil
         } catch {
             saveError = "Не удалось сохранить настройки шлюза: \(error.localizedDescription)"
@@ -108,14 +121,15 @@ final class GatewayStore: ObservableObject {
         }
 
         // 1. Туннель (если нужен).
-        if !ssh.isEmpty {
+        if usesTunnel {
             begin(1, "SSH-туннель к \(ssh)")
-            let (code, out) = await Self.runScript("tunnel.sh", env: ["MEETREC_GATEWAY_SSH": ssh, "MEETREC_GATEWAY_PORT": port])
-            guard code == 0 else {
-                finish(1, .failed, out.isEmpty ? "ssh завершился с кодом \(code)" : out)
+            let r = await Self.runScript("tunnel.sh", env: ["MEETREC_GATEWAY_SSH": ssh, "MEETREC_GATEWAY_PORT": effectivePort])
+            guard r.code == 0 else {
+                let msg = (r.err + " " + r.out).trimmingCharacters(in: .whitespaces)
+                finish(1, .failed, msg.isEmpty ? "ssh завершился с кодом \(r.code)" : msg)
                 return
             }
-            finish(1, .ok, "127.0.0.1:\(port) → \(ssh)")
+            finish(1, .ok, "127.0.0.1:\(effectivePort) → \(ssh)")
         }
 
         // 2. Авторизация и список моделей.
@@ -130,8 +144,12 @@ final class GatewayStore: ObservableObject {
             return
         }
 
-        // 3. Модель отвечает.
-        let m = model.isEmpty ? "default" : model
+        // 3. Модель отвечает. Не выбрана — первая из списка (другие шлюзы не знают «default»).
+        guard let m = model.isEmpty ? models.first : model else {
+            begin(3, "Ответ модели")
+            finish(3, .failed, "шлюз не отдал ни одной модели")
+            return
+        }
         begin(3, "Ответ модели \(m)")
         let started = Date()
         do {
@@ -157,14 +175,16 @@ final class GatewayStore: ObservableObject {
     func fetchToken() async {
         guard !ssh.isEmpty else { return }
         begin(0, "Токен с сервера")
-        let (code, out) = await Self.run("/usr/bin/ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh,
-                                                          "cat ~/.config/meetrec/gateway-token"])
-        let t = out.trimmingCharacters(in: .whitespacesAndNewlines)
-        if code == 0, !t.isEmpty, !t.contains(" ") {
+        // Токен — только из stdout: предупреждения ssh (known_hosts и т.п.) идут в stderr.
+        let r = await Self.run("/usr/bin/ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh,
+                                                "cat ~/.config/meetrec/gateway-token"])
+        let t = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if r.code == 0, !t.isEmpty, !t.contains(where: \.isWhitespace) {
             token = t
             finish(0, .ok, "получен")
         } else {
-            finish(0, .failed, out.isEmpty ? "ssh: код \(code)" : String(out.prefix(300)))
+            let msg = r.err.isEmpty ? r.out : r.err
+            finish(0, .failed, msg.isEmpty ? "ssh: код \(r.code)" : String(msg.prefix(300)))
         }
     }
 
@@ -219,32 +239,47 @@ final class GatewayStore: ObservableObject {
 
     // MARK: - Запуск процессов
 
-    static func runScript(_ name: String, env: [String: String]) async -> (Int32, String) {
+    struct RunResult { let code: Int32; let out: String; let err: String }
+
+    static func runScript(_ name: String, env: [String: String]) async -> RunResult {
         guard let root = Bundle.main.object(forInfoDictionaryKey: "MeetrecRepoRoot") as? String else {
-            return (-1, "в Info.plist нет MeetrecRepoRoot — пересобери build-app.sh")
+            return RunResult(code: -1, out: "", err: "в Info.plist нет MeetrecRepoRoot — пересобери build-app.sh")
         }
         return await run("/bin/bash", ["\(root)/scripts/\(name)"], env: env)
     }
 
-    static func run(_ executable: String, _ args: [String], env: [String: String] = [:]) async -> (Int32, String) {
+    /// Запуск с раздельными stdout/stderr. Вывод читается по мере поступления (не только в конце):
+    /// иначе процесс с выводом больше буфера канала (~64 КБ) заблокировался бы навсегда.
+    static func run(_ executable: String, _ args: [String], env: [String: String] = [:]) async -> RunResult {
         await withCheckedContinuation { cont in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: executable)
             p.arguments = args
             var e = ProcessInfo.processInfo.environment
             e.merge(env) { $1 }
-            e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            // GUI-приложение не видит PATH из shell — добавляем Homebrew и системные пути спереди.
+            e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + (e["PATH"] ?? "")
             p.environment = e
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = pipe
+            let outPipe = Pipe(), errPipe = Pipe()
+            p.standardOutput = outPipe
+            p.standardError = errPipe
             p.standardInput = FileHandle.nullDevice
+            let lock = NSLock()
+            var out = Data(), err = Data()
+            outPipe.fileHandleForReading.readabilityHandler = { h in let d = h.availableData; lock.withLock { out.append(d) } }
+            errPipe.fileHandleForReading.readabilityHandler = { h in let d = h.availableData; lock.withLock { err.append(d) } }
             p.terminationHandler = { proc in
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                cont.resume(returning: (proc.terminationStatus, String(decoding: data, as: UTF8.self)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)))
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                let restOut = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+                let restErr = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+                let (o, e) = lock.withLock { (out + restOut, err + restErr) }
+                func s(_ d: Data) -> String { String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
+                cont.resume(returning: RunResult(code: proc.terminationStatus, out: s(o), err: s(e)))
             }
-            do { try p.run() } catch { cont.resume(returning: (-1, error.localizedDescription)) }
+            do { try p.run() } catch {
+                cont.resume(returning: RunResult(code: -1, out: "", err: error.localizedDescription))
+            }
         }
     }
 }

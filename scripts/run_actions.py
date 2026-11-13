@@ -20,13 +20,26 @@ import urllib.request
 
 # Шлюз агента (OpenAI-совместимый: meetrec-gateway через SSH-туннель, Ollama, LiteLLM, OpenRouter…).
 # Задан — действия идут через него; иначе — через notes-cmd (claude -p / remote_notes.sh).
-GATEWAY_URL = os.environ.get("MEETREC_GATEWAY_URL", "").rstrip("/")
-GATEWAY_SSH = os.environ.get("MEETREC_GATEWAY_SSH", "")
-GATEWAY_PORT = os.environ.get("MEETREC_GATEWAY_PORT", "8787")
-GATEWAY_TOKEN = os.environ.get("MEETREC_GATEWAY_TOKEN", "")
-GATEWAY_MODEL = os.environ.get("MEETREC_GATEWAY_MODEL", "") or "default"
-if GATEWAY_SSH and not GATEWAY_URL:
+GATEWAY_URL = os.environ.get("MEETREC_GATEWAY_URL", "").strip().rstrip("/")
+GATEWAY_SSH = os.environ.get("MEETREC_GATEWAY_SSH", "").strip()
+GATEWAY_PORT = os.environ.get("MEETREC_GATEWAY_PORT", "").strip() or "8787"
+GATEWAY_TOKEN = os.environ.get("MEETREC_GATEWAY_TOKEN", "").strip()
+GATEWAY_MODEL = os.environ.get("MEETREC_GATEWAY_MODEL", "").strip()
+# Туннель — только когда свой адрес не задан (тогда адрес — локальный конец туннеля).
+USE_TUNNEL = bool(GATEWAY_SSH) and not GATEWAY_URL
+if USE_TUNNEL:
     GATEWAY_URL = f"http://127.0.0.1:{GATEWAY_PORT}/v1"
+
+
+def first_model():
+    """Модель по умолчанию не выбрана: берём первую из /models (другие шлюзы не знают «default»)."""
+    req = urllib.request.Request(GATEWAY_URL + "/models", headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp).get("data", [])
+        return data[0]["id"] if data else ""
+    except Exception:
+        return ""
 
 RESERVED = {"transcript.md", "meta.md", "mic.json", "system.json", "process.log", "rec.log", "results.json"}
 MANIFEST = "results.json"  # что получилось в этом прогоне — его читает приложение
@@ -114,24 +127,31 @@ def _run(action, out, cmd, stdin, meeting_dir):
     return action.get("name", "?"), out, True, "", took
 
 
-def main():
+def main():  # noqa: C901
     if len(sys.argv) != 4:
         sys.exit("usage: run_actions.py <meeting-dir> <actions.json> <notes-cmd>")
     meeting_dir, actions_path, cmd = sys.argv[1:]
     actions, source = load_actions(actions_path)
     enabled = [a for a in actions if a.get("enabled", True) and (a.get("prompt") or "").strip()]
     print(f"  действий: {len(enabled)} (из {os.path.basename(source)}); "
-          + (f"через шлюз {GATEWAY_URL}, модель по умолчанию {GATEWAY_MODEL}" if GATEWAY_URL else f"через {cmd}"))
-    if GATEWAY_URL and GATEWAY_SSH:
-        tunnel = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel.sh")
-        t = subprocess.run(["bash", tunnel], capture_output=True, text=True)
-        if t.returncode != 0:
-            print(f"  ❌ SSH-туннель к шлюзу не поднялся: {(t.stderr or t.stdout).strip()[:300]}")
-            write_manifest(meeting_dir, [])
-            return 1
+          + (f"через шлюз {GATEWAY_URL}" if GATEWAY_URL else f"через {cmd}"))
     if not enabled:
         write_manifest(meeting_dir, [])
         return 0
+    global GATEWAY_MODEL
+    if GATEWAY_URL:
+        if USE_TUNNEL:
+            tunnel = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel.sh")
+            t = subprocess.run(["bash", tunnel], capture_output=True, text=True)
+            if t.returncode != 0:  # прежний results.json не трогаем — заметки прошлого прогона остаются видны
+                print(f"  ❌ SSH-туннель к шлюзу не поднялся: {(t.stderr or t.stdout).strip()[:300]}")
+                return 1
+        if not GATEWAY_MODEL and any(not a.get("model") for a in enabled):
+            GATEWAY_MODEL = first_model()
+            if not GATEWAY_MODEL:
+                print("  ❌ шлюз не отдал список моделей — выбери модель по умолчанию в настройках")
+                return 1
+        print(f"  модель по умолчанию: {GATEWAY_MODEL or '—'}")
 
     def read(name):
         p = os.path.join(meeting_dir, name)

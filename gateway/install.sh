@@ -6,6 +6,8 @@ cd "$(dirname "$0")"
 go build -o "$HOME/.local/bin/meetrec-gateway" .
 mkdir -p "$HOME/.config/systemd/user"
 cp meetrec-gateway.service "$HOME/.config/systemd/user/"
+# Без linger пользовательские сервисы живут только пока есть сеанс входа.
+loginctl enable-linger "$USER" 2>/dev/null || true
 systemctl --user daemon-reload
 systemctl --user enable --now meetrec-gateway
 systemctl --user restart meetrec-gateway

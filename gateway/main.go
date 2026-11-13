@@ -194,9 +194,11 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.claude, "-p", prompt, "--model", model,
-		"--output-format", "json", "--no-session-persistence")
+	// "--" — промпт, начинающийся с «-» (списки), не должен разбираться как флаг claude.
+	cmd := exec.CommandContext(ctx, s.claude, "-p", "--model", model,
+		"--output-format", "json", "--no-session-persistence", "--", prompt)
 	cmd.Dir = s.workdir
+	cmd.WaitDelay = 5 * time.Second // таймаут срабатывает, даже если дочерние процессы claude держат вывод
 	cmd.Stdin = strings.NewReader(strings.Join(convo, "\n\n"))
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
