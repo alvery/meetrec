@@ -16,7 +16,8 @@ import subprocess
 import sys
 import time
 
-RESERVED = {"transcript.md", "meta.md", "mic.json", "system.json", "process.log", "rec.log"}
+RESERVED = {"transcript.md", "meta.md", "mic.json", "system.json", "process.log", "rec.log", "results.json"}
+MANIFEST = "results.json"  # что получилось в этом прогоне — его читает приложение
 
 PREAMBLE = """Below are the meeting metadata (if any) and an automatic transcript of the meeting.
 «Я» is me (my microphone). «Они» are the other participants (system audio; individual speakers are not \
@@ -47,20 +48,27 @@ def output_name(action, taken):
 
 
 def run(action, out, cmd, stdin, meeting_dir):
+    try:
+        return _run(action, out, cmd, stdin, meeting_dir)
+    except Exception as e:  # одно сломанное действие не должно терять отчёт об остальных
+        return action.get("name", "?"), out, False, f"{type(e).__name__}: {e}", 0.0
+
+
+def _run(action, out, cmd, stdin, meeting_dir):
     started = time.time()
-    proc = subprocess.run(["bash", "-c", cmd + ' "$1"', "action", action["prompt"]],
+    proc = subprocess.run(["bash", "-c", cmd + ' "$1"', "action", action.get("prompt", "")],
                           input=stdin.encode("utf-8"), capture_output=True)
     took = time.time() - started
     if proc.returncode != 0:
         # claude -p пишет ошибки в stdout — показываем начало (это текст ошибки, не заметок).
         msg = (proc.stdout.decode("utf-8", "replace")[:300] + " " +
                proc.stderr.decode("utf-8", "replace")[-300:]).strip()
-        return action["name"], out, False, f"код {proc.returncode}: {msg}", took
+        return action.get("name", "?"), out, False, f"код {proc.returncode}: {msg}", took
     tmp = os.path.join(meeting_dir, out + ".part")
     with open(tmp, "wb") as f:
         f.write(proc.stdout)
     os.replace(tmp, os.path.join(meeting_dir, out))
-    return action["name"], out, True, "", took
+    return action.get("name", "?"), out, True, "", took
 
 
 def main():
@@ -71,6 +79,7 @@ def main():
     enabled = [a for a in actions if a.get("enabled", True) and (a.get("prompt") or "").strip()]
     print(f"  действий: {len(enabled)} (из {os.path.basename(source)})")
     if not enabled:
+        write_manifest(meeting_dir, [])
         return 0
 
     def read(name):
@@ -81,16 +90,26 @@ def main():
     taken = set()
     jobs = [(a, output_name(a, taken)) for a in enabled]
     failed = 0
+    results = []
     with cf.ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
         futures = [pool.submit(run, a, out, cmd, stdin, meeting_dir) for a, out in jobs]
         for fut in futures:
             name, out, ok, msg, took = fut.result()
+            results.append({"name": name, "file": out, "ok": ok})
             if ok:
                 print(f"  ✅ «{name}» → {out} ({took:.0f} с)")
             else:
                 failed += 1
                 print(f"  ❌ «{name}» ({took:.0f} с): {msg}")
+    write_manifest(meeting_dir, results)
     return 1 if failed else 0
+
+
+def write_manifest(meeting_dir, results):
+    path = os.path.join(meeting_dir, MANIFEST)
+    with open(path + ".part", "w", encoding="utf-8") as f:
+        json.dump({"finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "results": results}, f, ensure_ascii=False, indent=2)
+    os.replace(path + ".part", path)
 
 
 if __name__ == "__main__":

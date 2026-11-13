@@ -394,6 +394,7 @@ final class AppState: ObservableObject {
         p.environment = env
         p.standardOutput = FileHandle.nullDevice // process.sh сам пишет process.log
         p.standardError = FileHandle.nullDevice
+        let runStarted = Date()
         p.terminationHandler = { proc in
             let ok = proc.terminationStatus == 0
             Task { @MainActor in
@@ -409,7 +410,8 @@ final class AppState: ObservableObject {
                 } else {
                     state.unseenNotes = false
                     if !state.windowVisible { state.unseenFailure = true }
-                    Notifier.failed(title: title, dir: dir, partial: !results.isEmpty, quiet: state.isRecording)
+                    let partial = !results.isEmpty && Self.manifestNewer(than: runStarted, in: dir)
+                    Notifier.failed(title: title, dir: dir, partial: partial, quiet: state.isRecording)
                 }
             }
         }
@@ -434,12 +436,14 @@ final class AppState: ObservableObject {
             .sorted { $0.1 > $1.1 }
             .prefix(5)
             .map { dir, date in
-                MeetingFolder(url: dir, title: Self.title(of: dir), date: date, status: status(of: dir), results: Self.results(in: dir))
+                let results = Self.results(in: dir)
+                return MeetingFolder(url: dir, title: Self.title(of: dir), date: date,
+                                     status: status(of: dir, results: results), results: results)
             }
         assign(\.meetings, list)
     }
 
-    private func status(of dir: URL) -> MeetingStatus {
+    private func status(of dir: URL, results: [URL]) -> MeetingStatus {
         let fm = FileManager.default
         if dir == recordingDir { return .recording }
         let log = Self.logInfo(dir)
@@ -447,19 +451,35 @@ final class AppState: ObservableObject {
             return .processing(stage: log.stage)
         }
         // Есть результаты действий — встреча «готова», даже если часть действий / повтор упали.
-        if !Self.results(in: dir).isEmpty { return .done }
+        if !results.isEmpty { return .done }
         if let code = log.exitCode, code != 0 { return .failed }
         // Действия выключены — готово, когда есть транскрипт и обработка завершилась успешно.
         if log.exitCode == 0, fm.fileExists(atPath: dir.appendingPathComponent("transcript.md").path) { return .done }
         return .pending
     }
 
-    /// Существующие файлы результатов действий в папке встречи, в порядке действий.
+    /// Результаты действий из results.json, который пишет run_actions.py (имена файлов — уже
+    /// нормализованные скриптом). Встречи, обработанные до действий, — notes.md.
     static func results(in dir: URL) -> [URL] {
         let fm = FileManager.default
-        var names = ActionsStore.shared.outputs
-        if !names.contains("notes.md") { names.append("notes.md") } // встречи, обработанные до действий
-        return names.map { dir.appendingPathComponent($0) }.filter { fm.fileExists(atPath: $0.path) }
+        struct Manifest: Decodable {
+            struct Item: Decodable { let file: String; let ok: Bool }
+            let results: [Item]
+        }
+        if let data = try? Data(contentsOf: dir.appendingPathComponent("results.json")),
+           let m = try? JSONDecoder().decode(Manifest.self, from: data) {
+            return m.results.filter(\.ok)
+                .map { dir.appendingPathComponent($0.file) }
+                .filter { fm.fileExists(atPath: $0.path) }
+        }
+        let legacy = dir.appendingPathComponent("notes.md")
+        return fm.fileExists(atPath: legacy.path) ? [legacy] : []
+    }
+
+    /// results.json записан этим прогоном (позже его старта) — значит, действия дошли до конца.
+    static func manifestNewer(than date: Date, in dir: URL) -> Bool {
+        let m = try? dir.appendingPathComponent("results.json").resourceValues(forKeys: [.contentModificationDateKey])
+        return (m?.contentModificationDate ?? .distantPast) > date
     }
 
     /// Последний код выхода и текущая стадия обработки — из хвоста process.log.

@@ -8,10 +8,24 @@ struct MeetingAction: Codable, Identifiable, Equatable {
     var enabled: Bool
     var output: String
     var prompt: String
+
+    init(id: String, name: String, enabled: Bool, output: String, prompt: String) {
+        (self.id, self.name, self.enabled, self.output, self.prompt) = (id, name, enabled, output, prompt)
+    }
+
+    /// Терпимо к файлу, написанному руками: id/enabled/output необязательны (как и для run_actions.py).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Действие"
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        output = try c.decodeIfPresent(String.self, forKey: .output) ?? ""
+        prompt = try c.decodeIfPresent(String.self, forKey: .prompt) ?? ""
+    }
 }
 
 private struct ActionsFile: Codable {
-    var version = 1
+    var version: Int? = 1
     var actions: [MeetingAction]
 }
 
@@ -23,15 +37,43 @@ final class ActionsStore: ObservableObject {
     static let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/meetrec/actions.json")
 
     @Published var actions: [MeetingAction] = [] {
-        didSet { if !loading { save() } }
+        didSet { if !loading { scheduleSave() } }
     }
     @Published private(set) var saveError: String?
+    /// actions.json есть, но не читается — приложение его не перезаписывает (иначе потеря действий).
+    @Published private(set) var loadError: String?
     private var loading = false
+    private var saveTask: Task<Void, Never>?
 
     private init() {
         loading = true
-        actions = Self.read(Self.url) ?? Self.defaults()
+        if FileManager.default.fileExists(atPath: Self.url.path) {
+            do {
+                actions = try Self.decode(Self.url)
+            } catch {
+                loadError = "Не читается \(Self.url.path): \(error.localizedDescription). Исправь файл или удали его — изменения здесь не сохраняются."
+                actions = Self.defaults()
+            }
+        } else {
+            actions = Self.defaults()
+        }
         loading = false
+    }
+
+    /// Сохранение с задержкой: не писать файл на каждую букву в редакторе промпта.
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            self.save()
+        }
+    }
+
+    func binding(for id: String) -> MeetingAction? { actions.first { $0.id == id } }
+
+    func update(_ action: MeetingAction) {
+        if let i = actions.firstIndex(where: { $0.id == action.id }) { actions[i] = action }
     }
 
     /// Файлы результатов в порядке действий (для «открыть главное» и списка в меню).
@@ -55,6 +97,7 @@ final class ActionsStore: ObservableObject {
     }
 
     private func save() {
+        guard loadError == nil else { return }
         do {
             try FileManager.default.createDirectory(at: Self.url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()
@@ -66,13 +109,12 @@ final class ActionsStore: ObservableObject {
         }
     }
 
-    private static func read(_ url: URL) -> [MeetingAction]? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return (try? JSONDecoder().decode(ActionsFile.self, from: data))?.actions
+    private static func decode(_ url: URL) throws -> [MeetingAction] {
+        try JSONDecoder().decode(ActionsFile.self, from: Data(contentsOf: url)).actions
     }
 
     private static func defaults() -> [MeetingAction] {
         guard let root = Bundle.main.object(forInfoDictionaryKey: "MeetrecRepoRoot") as? String else { return [] }
-        return read(URL(fileURLWithPath: root).appendingPathComponent("prompts/actions.default.json")) ?? []
+        return (try? decode(URL(fileURLWithPath: root).appendingPathComponent("prompts/actions.default.json"))) ?? []
     }
 }

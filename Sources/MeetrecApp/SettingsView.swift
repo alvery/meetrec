@@ -11,6 +11,8 @@ struct SettingsView: View {
                 .tabItem { Label("Действия", systemImage: "sparkles") }
         }
         .frame(width: 760, height: 520)
+        // Приложение без Dock-иконки: окно настроек (в т.ч. по ⌘,) должно выйти поверх остальных.
+        .onAppear { NSApp.activate(ignoringOtherApps: true) }
     }
 }
 
@@ -28,6 +30,9 @@ private struct GeneralSettings: View {
                         Text(state.meetingsRoot.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
                             .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
                         Button("Выбрать…") { chooseFolder() }
+                            .disabled(state.isRecording || state.processingMeeting != nil)
+                            .help(state.isRecording || state.processingMeeting != nil
+                                  ? "Нельзя менять папку, пока идёт запись или обработка" : "")
                         Button("Открыть") { state.open(state.meetingsRoot) }
                     }
                 }
@@ -110,8 +115,11 @@ private struct ActionsSettings: View {
             .frame(width: 240)
             Divider()
             Group {
-                if let i = store.actions.firstIndex(where: { $0.id == selection }) {
-                    ActionEditor(action: $store.actions[i])
+                // Привязка по id, а не по индексу: удаление/«Стандартные…» не роняют редактор.
+                if let id = selection, let current = store.binding(for: id) {
+                    ActionEditor(action: Binding(get: { store.binding(for: id) ?? current },
+                                                 set: { store.update($0) }))
+                        .id(id)
                 } else {
                     VStack(spacing: 8) {
                         Image(systemName: "sparkles").font(.largeTitle).foregroundStyle(.secondary)
@@ -126,7 +134,7 @@ private struct ActionsSettings: View {
             Button("Заменить", role: .destructive) { store.resetToDefaults(); selection = store.actions.first?.id }
         }
         .overlay(alignment: .bottom) {
-            if let err = store.saveError {
+            if let err = store.loadError ?? store.saveError {
                 Text(err).font(.caption).foregroundStyle(.red).padding(6)
             }
         }
