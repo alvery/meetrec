@@ -99,6 +99,8 @@ final class AppState: ObservableObject {
     @Published private(set) var event: MeetingEvent?
     @Published private(set) var followingEvent: MeetingEvent?
     @Published private(set) var promptEvent: MeetingEvent?
+    /// Встреча, для которой показана плашка «Через минуту — Подключиться».
+    @Published private(set) var joinPanelEvent: MeetingEvent?
     /// Меняется раз в минуту — чтобы обратный отсчёт в метке и окне не застывал.
     @Published private(set) var minuteTick = 0
 
@@ -153,13 +155,14 @@ final class AppState: ObservableObject {
             promptEvent = nil
         }
 
-        // За минуту до встречи — напоминание с «Подключиться». Смотрим и следующую:
-        // при встречах подряд main — ещё идущая встреча.
+        // За минуту до встречи — плашка «Подключиться». Смотрим и следующую:
+        // при встречах подряд main — ещё идущая встреча. Плашка гаснет через 3 мин после начала.
         for e in [main, following].compactMap({ $0 })
         where e.joinURL != nil && e.start > now && e.start.timeIntervalSince(now) <= 60 && !joinReminded.contains(e.id) {
             joinReminded.insert(e.id)
-            Notifier.joinSoon(e, quiet: isRecording)
+            joinPanelEvent = e
         }
+        if let j = joinPanelEvent, now > j.start.addingTimeInterval(180) { joinPanelEvent = nil }
 
         // Встреча идёт и Zoom/Meet занял микрофон — предложить запись (один раз на встречу).
         if !isRecording, !isStarting, let e = main,
@@ -168,8 +171,9 @@ final class AppState: ObservableObject {
             prompted.insert(e.id)
             promptEvent = e
             promptShownAt = now
-            Notifier.meetingStarted(e)
+            joinPanelEvent = nil
         }
+        updatePanel()
 
         // Диск читаем часто, только пока что-то пишется или обрабатывается; иначе — при открытии окна.
         if isRecording || !started.isEmpty || processingMeeting != nil { refreshMeetings() }
@@ -205,10 +209,31 @@ final class AppState: ObservableObject {
 
     func join(_ event: MeetingEvent) {
         if let url = event.joinURL { NSWorkspace.shared.open(url) }
+        joinPanelEvent = nil
+        updatePanel()
     }
 
     func dismissPrompt() {
         promptEvent = nil
+        updatePanel()
+    }
+
+    func dismissJoin() {
+        joinPanelEvent = nil
+        updatePanel()
+    }
+
+    /// Плашка: «Записать?» важнее «Подключиться»; во время записи — ничего.
+    func updatePanel() {
+        if isRecording || isStarting {
+            FloatingPanel.shared.hide()
+        } else if let e = promptEvent {
+            FloatingPanel.shared.show(.prompt(e))
+        } else if let e = joinPanelEvent {
+            FloatingPanel.shared.show(.join(e))
+        } else {
+            FloatingPanel.shared.hide()
+        }
     }
 
     // MARK: - Запись
@@ -221,6 +246,8 @@ final class AppState: ObservableObject {
         isStarting = true
         errorText = nil
         promptEvent = nil
+        joinPanelEvent = nil
+        updatePanel()
         // Запросы разрешений блокируют поток до ответа пользователя — не на главном.
         Task.detached {
             let micOK = Recording.requestMicAccess()
@@ -233,6 +260,7 @@ final class AppState: ObservableObject {
 
     private func finishStart(dir: URL, event: MeetingEvent?, micOK: Bool, audioWarning: String?) {
         isStarting = false
+        defer { updatePanel() }
         guard micOK else {
             refreshPermissions()
             errorText = "Запись не началась: нет доступа к микрофону."

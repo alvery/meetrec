@@ -45,14 +45,15 @@ struct MenuBarLabel: View {
         if let p = state.processingMeeting { return (Self.symbol, "⋯", "делаю заметки: \(p.title)") }
         if state.unseenFailure { return (Self.symbol, "!", "не удалось сделать заметки") }
         if let e = state.event {
+            let name = Format.short(e.title)
             if e.isInProgress(at: now) {
                 let left = Format.minutes(e.end.timeIntervalSince(now))
-                return (Self.symbol, "ещё \(left)", "\(e.title) идёт, ещё \(left)")
+                return (Self.symbol, "\(name) · ещё \(left)", "\(e.title) идёт, ещё \(left)")
             }
             let until = e.start.timeIntervalSince(now)
             if until <= 3600 {
                 let m = Format.minutes(until)
-                return (Self.symbol, m, "\(e.title) через \(m)")
+                return (Self.symbol, "\(name) · \(m)", "\(e.title) через \(m)")
             }
         }
         return (Self.symbol, nil, "нет встреч")
@@ -433,4 +434,9 @@ enum Format {
     }
 
     static func day(_ d: Date) -> String { dayFormatter.string(from: d) }
+
+    /// Название для строки меню: она общая с другими иконками, длинное — обрезаем.
+    static func short(_ title: String, max: Int = 18) -> String {
+        title.count > max ? String(title.prefix(max - 1)).trimmingCharacters(in: .whitespaces) + "…" : title
+    }
 }

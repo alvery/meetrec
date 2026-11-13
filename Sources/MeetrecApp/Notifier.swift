@@ -5,8 +5,10 @@ import UserNotifications
 /// (его увидят все на демонстрации экрана). Во время созвона — без звука: звук попал бы в запись.
 enum Notifier {
     enum Category {
-        static let prompt = "PROMPT"   // встреча идёт, микрофон занят — записать?
-        static let join = "JOIN"       // встреча через минуту
+        // «Записать?» и «Через минуту — Подключиться» — плашкой (FloatingPanel), не уведомлением:
+        // у уведомлений macOS с двумя действиями кнопки прячутся в меню «Параметры».
+        static let prompt = "PROMPT"   // старые уведомления из центра уведомлений
+        static let join = "JOIN"
         static let notes = "NOTES"     // заметки готовы
         static let failed = "FAILED"   // обработка упала
     }
@@ -42,16 +44,6 @@ enum Notifier {
                                              action(Action.retry, "Повторить", "arrow.clockwise")],
                                    intentIdentifiers: [], options: []),
         ])
-    }
-
-    static func meetingStarted(_ event: MeetingEvent) {
-        post(title: event.title, body: "Встреча идёт, микрофон занят. Записать?",
-             category: Category.prompt, info: ["eventID": event.id], sound: false)
-    }
-
-    static func joinSoon(_ event: MeetingEvent, quiet: Bool) {
-        post(title: event.title, body: "Через минуту", category: Category.join,
-             info: ["url": event.joinURL?.absoluteString ?? ""], sound: !quiet)
     }
 
     static func notesReady(title: String, notes: URL, quiet: Bool) {
