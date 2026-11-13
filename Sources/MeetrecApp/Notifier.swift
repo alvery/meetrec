@@ -1,21 +1,15 @@
 import AppKit
 import UserNotifications
 
-/// Системные уведомления. Заголовок — название встречи; содержимое заметок в баннер не выводим
+/// Системные уведомления — только итог обработки («Записать?» и «Подключиться» — плашкой,
+/// см. FloatingPanel: у уведомлений с двумя действиями кнопки прячутся в «Параметры»). Заголовок — название встречи; содержимое заметок в баннер не выводим
 /// (его увидят все на демонстрации экрана). Во время созвона — без звука: звук попал бы в запись.
 enum Notifier {
     enum Category {
-        // «Записать?» и «Через минуту — Подключиться» — плашкой (FloatingPanel), не уведомлением:
-        // у уведомлений macOS с двумя действиями кнопки прячутся в меню «Параметры».
-        static let prompt = "PROMPT"   // старые уведомления из центра уведомлений
-        static let join = "JOIN"
         static let notes = "NOTES"     // заметки готовы
         static let failed = "FAILED"   // обработка упала
     }
     enum Action {
-        static let record = "RECORD"
-        static let skip = "SKIP"
-        static let join = "JOIN"
         static let openLog = "OPEN_LOG"
         static let retry = "RETRY"
     }
@@ -31,13 +25,6 @@ enum Notifier {
                                  icon: UNNotificationActionIcon(systemImageName: symbol))
         }
         center.setNotificationCategories([
-            UNNotificationCategory(identifier: Category.prompt,
-                                   actions: [action(Action.record, "Записать", "record.circle"),
-                                             action(Action.skip, "Не записывать", "xmark")],
-                                   intentIdentifiers: [], options: []),
-            UNNotificationCategory(identifier: Category.join,
-                                   actions: [action(Action.join, "Подключиться", "video")],
-                                   intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: Category.notes, actions: [], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: Category.failed,
                                    actions: [action(Action.openLog, "Открыть лог", "doc.text.magnifyingglass"),
@@ -92,14 +79,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         Task { @MainActor in
             let state = AppState.shared
             switch content.categoryIdentifier {
-            case Notifier.Category.prompt:
-                if action == Notifier.Action.skip {
-                    state.dismissPrompt()
-                } else if action == Notifier.Action.record || isDefault {
-                    state.startRecording(for: state.promptEvent)
-                }
-            case Notifier.Category.join where action == Notifier.Action.join || isDefault:
-                if let s = info["url"] as? String, let url = URL(string: s), !s.isEmpty { state.open(url) }
             case Notifier.Category.notes where isDefault:
                 if let path = info["path"] as? String { state.open(URL(fileURLWithPath: path)) }
             case Notifier.Category.failed:

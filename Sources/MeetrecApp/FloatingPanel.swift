@@ -32,7 +32,9 @@ final class FloatingPanel {
         panel = p
         p.contentView = hosting
         p.setContentSize(size)
-        if let screen = NSScreen.main {
+        // Экран, где сейчас курсор (там, скорее всего, и Zoom), иначе главный.
+        let mouse = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main {
             let f = screen.visibleFrame
             p.setFrameOrigin(NSPoint(x: f.maxX - size.width - 12, y: f.maxY - size.height - 12))
         }
@@ -42,6 +44,7 @@ final class FloatingPanel {
     func hide() {
         shownID = nil
         panel?.orderOut(nil)
+        panel?.contentView = nil // скрытая плашка не должна перерисовываться на каждое обновление AppState
     }
 
     private func makePanel() -> NSPanel {
@@ -117,7 +120,9 @@ struct PanelView: View {
     private var subtitle: String {
         switch kind {
         case .prompt: return "Встреча идёт, микрофон занят — записать?"
-        case .join(let e): return "Через \(Format.minutes(e.start.timeIntervalSinceNow)) · \(Format.details(e))"
+        case .join(let e):
+            let t = e.start.timeIntervalSinceNow
+            return (t > 0 ? "Через \(Format.minutes(t))" : "Уже идёт") + " · \(Format.details(e))"
         }
     }
 }

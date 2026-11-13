@@ -66,7 +66,7 @@ enum Permission: String, Identifiable, CaseIterable {
         case .microphone: return "Нет доступа к микрофону — дорожка «Я» не запишется"
         case .systemAudio: return "Нет доступа к системному звуку — дорожка «Они» будет тишиной"
         case .calendar: return "Нет доступа к календарю — встречи не видны"
-        case .notifications: return "Уведомления выключены — подсказки «Записать?» не придут"
+        case .notifications: return "Уведомления выключены — не узнаешь, что заметки готовы"
         }
     }
 
@@ -171,7 +171,8 @@ final class AppState: ObservableObject {
             prompted.insert(e.id)
             promptEvent = e
             promptShownAt = now
-            joinPanelEvent = nil
+            // Микрофон занят этой же встречей — значит, уже подключился; напоминание о другой встрече не трогаем.
+            if joinPanelEvent?.id == e.id { joinPanelEvent = nil }
         }
         updatePanel()
 
@@ -223,11 +224,10 @@ final class AppState: ObservableObject {
         updatePanel()
     }
 
-    /// Плашка: «Записать?» важнее «Подключиться»; во время записи — ничего.
+    /// Плашка: «Записать?» важнее «Подключиться». Во время записи «Записать?» не нужна,
+    /// а «Подключиться» к следующей встрече (встречи подряд) — нужна.
     func updatePanel() {
-        if isRecording || isStarting {
-            FloatingPanel.shared.hide()
-        } else if let e = promptEvent {
+        if let e = promptEvent, !isRecording, !isStarting {
             FloatingPanel.shared.show(.prompt(e))
         } else if let e = joinPanelEvent {
             FloatingPanel.shared.show(.join(e))
@@ -314,6 +314,7 @@ final class AppState: ObservableObject {
         Meter.shared.reset()
         let title = recordingTitle ?? Self.title(of: rec.dir)
         recordingTitle = nil
+        updatePanel()
         process(rec.dir, title: title)
     }
 

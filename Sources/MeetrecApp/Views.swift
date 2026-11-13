@@ -45,15 +45,15 @@ struct MenuBarLabel: View {
         if let p = state.processingMeeting { return (Self.symbol, "⋯", "делаю заметки: \(p.title)") }
         if state.unseenFailure { return (Self.symbol, "!", "не удалось сделать заметки") }
         if let e = state.event {
+            // Коротко: на MacBook с вырезом длинная метка уходит под него и пропадает.
             let name = Format.short(e.title)
             if e.isInProgress(at: now) {
-                let left = Format.minutes(e.end.timeIntervalSince(now))
-                return (Self.symbol, "\(name) · ещё \(left)", "\(e.title) идёт, ещё \(left)")
+                let left = e.end.timeIntervalSince(now)
+                return (Self.symbol, "\(name) · ещё \(Format.compact(left))", "\(e.title) идёт, ещё \(Format.minutes(left))")
             }
             let until = e.start.timeIntervalSince(now)
             if until <= 3600 {
-                let m = Format.minutes(until)
-                return (Self.symbol, "\(name) · \(m)", "\(e.title) через \(m)")
+                return (Self.symbol, "\(name) · \(Format.compact(until))", "\(e.title) через \(Format.minutes(until))")
             }
         }
         return (Self.symbol, nil, "нет встреч")
@@ -436,7 +436,13 @@ enum Format {
     static func day(_ d: Date) -> String { dayFormatter.string(from: d) }
 
     /// Название для строки меню: она общая с другими иконками, длинное — обрезаем.
-    static func short(_ title: String, max: Int = 18) -> String {
+    /// Для строки меню: «23 мин», «1ч23».
+    static func compact(_ t: TimeInterval) -> String {
+        let m = max(0, Int((t / 60).rounded(.up)))
+        return m >= 60 ? "\(m / 60)ч\(String(format: "%02d", m % 60))" : "\(m) мин"
+    }
+
+    static func short(_ title: String, max: Int = 14) -> String {
         title.count > max ? String(title.prefix(max - 1)).trimmingCharacters(in: .whitespaces) + "…" : title
     }
 }
