@@ -3,7 +3,15 @@
 #
 #   ./scripts/mock-meeting.sh [через_минут] [длительность_минут] [название]
 #       по умолчанию: через 2 мин, 15 мин, «Тестовый созвон meetrec»
+#   ./scripts/mock-meeting.sh --day       набор встреч для проверки новых функций (см. ниже)
 #   ./scripts/mock-meeting.sh --clean     удалить все события календаря meetrec-test
+#
+# --day:
+#   +3 мин  «Sync платформы» (10 мин)  — плашка «Подключиться» с проверкой звука; запиши, затем выйди из Meet
+#                                         → через минуту «Остановить запись?»; ★ — ⌃⌥M во время записи
+#   +13 мин «1:1 с Аней» (10 мин)       — встык: «Началась «1:1 с Аней»» + «Стоп и подключиться»;
+#                                         за 5 мин до конца записи кольцо в строке меню желтеет
+#   +40 мин «Sync платформы» (10 мин)   — второй раз: в карточке и на плашке задачи с первой встречи
 #
 # Ссылка — https://meet.google.com/new: «Подключиться» откроет новую комнату Meet,
 # браузер займёт микрофон — можно проверить уведомление «Начинается… — Записать?».
@@ -27,12 +35,8 @@ AS
   exit 0
 fi
 
-in_min="${1:-2}"
-dur_min="${2:-15}"
-title="${3:-Тестовый созвон meetrec}"
-link="https://meet.google.com/new"
-
-osascript - "$CAL" "$in_min" "$dur_min" "$title" "$link" <<'AS'
+create() { # через_минут длительность_минут название
+  osascript - "$CAL" "$1" "$2" "$3" "https://meet.google.com/new" <<'AS'
 on run argv
   set calName to item 1 of argv
   set inMin to (item 2 of argv) as integer
@@ -50,3 +54,13 @@ on run argv
   return "создано: «" & evTitle & "» " & (time string of startDate) & "–" & (time string of endDate) & " в календаре " & calName
 end run
 AS
+}
+
+if [[ "${1:-}" == "--day" ]]; then
+  create 3 10 "Sync платформы"
+  create 13 10 "1:1 с Аней"
+  create 40 10 "Sync платформы"
+  exit 0
+fi
+
+create "${1:-2}" "${2:-15}" "${3:-Тестовый созвон meetrec}"
