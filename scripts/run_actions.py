@@ -117,6 +117,9 @@ def _run(action, out, cmd, stdin, meeting_dir):
     proc = subprocess.run(["bash", "-c", cmd + ' "$1"', "action", action.get("prompt", "")],
                           input=stdin.encode("utf-8"), capture_output=True)
     took = time.time() - started
+    if proc.returncode == 127:  # bash: команда не найдена — агент не настроен
+        return action.get("name", "?"), out, False, \
+            f"агент для заметок не настроен (нет команды «{cmd}»): meetrec → Настройки → Агент", took
     if proc.returncode != 0:
         # claude -p пишет ошибки в stdout — показываем начало (это текст ошибки, не заметок).
         msg = (proc.stdout.decode("utf-8", "replace")[:300] + " " +

@@ -170,6 +170,8 @@ final class AppState: ObservableObject {
 
     // Разрешения и встречи
     @Published private(set) var missingPermissions: [Permission] = []
+    /// Нечем делать заметки: ни шлюза, ни своей команды, ни Claude Code — будет только транскрипт.
+    @Published private(set) var agentMissing = false
     @Published private(set) var meetings: [MeetingFolder] = []
     /// Обработка упала, а окно с тех пор не открывали — «!» в иконке.
     @Published private(set) var unseenFailure = false
@@ -285,6 +287,7 @@ final class AppState: ObservableObject {
 
     /// Окно открыли: всё актуализировать (диск, разрешения), «!» в метке погасить.
     func popoverOpened() {
+        refreshAgent()
         refreshBriefing(for: event) // могли появиться новые заметки
         unseenFailure = false
         unseenNotes = false
@@ -332,6 +335,21 @@ final class AppState: ObservableObject {
                 state.refreshPermissions()
             }
         }
+    }
+
+    /// Агент настроен явно: шлюз (в настройках или в env) или своя команда / сервер для заметок.
+    /// Локальный `claude` сам по себе не считается — его подключают явно (NOTES_CMD), см. README.
+    func refreshAgent() {
+        let env = (try? String(contentsOf: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/meetrec/env"), encoding: .utf8)) ?? ""
+        let keys = ["NOTES_CMD", "MEETREC_NOTES_HOST", "MEETREC_GATEWAY_URL", "MEETREC_GATEWAY_SSH"]
+        // Как в config.sh: «[export] KEY=value», значение непустое.
+        let set = env.split(separator: "\n").contains { line in
+            keys.contains { key in
+                line.range(of: #"^\s*(export\s+)?"# + key + #"\s*=\s*[^\s#]"#, options: .regularExpression) != nil
+            }
+        }
+        assign(\.agentMissing, !GatewayStore.shared.isConfigured && !set)
     }
 
     func refreshPermissions() {

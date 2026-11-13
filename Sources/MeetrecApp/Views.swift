@@ -104,6 +104,7 @@ struct ContentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             PermissionRows()
+            if state.agentMissing { AgentRow() }
             if state.isRecording { RecordingHero() } else { EventHero() }
             if let err = state.errorText { ErrorRow(text: err) }
             if let p = state.processingMeeting, !state.isRecording { ProcessingRow(meeting: p) }
@@ -139,6 +140,24 @@ struct PermissionRows: View {
                     Button("Открыть настройки") { state.open(p.settingsURL) }.controlSize(.small)
                 }
             }
+        }
+    }
+}
+
+/// Новый пользователь ещё не подключил модель: без неё после записи будет только транскрипт.
+struct AgentRow: View {
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "sparkles").foregroundStyle(.orange)
+            Text("Агент для заметок не настроен — после записи будет только транскрипт")
+                .font(.callout).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            SettingsLink { Text("Настроить") }
+                .controlSize(.small)
+                .simultaneousGesture(TapGesture().onEnded {
+                    UserDefaults.standard.set("agent", forKey: SettingsView.tabKey) // сразу на вкладку «Агент»
+                    NSApp.activate(ignoringOtherApps: true)
+                })
         }
     }
 }

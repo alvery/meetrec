@@ -27,5 +27,5 @@ mkdir -p "$ROOT/models"
 download "$MODEL_NAME" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MODEL_NAME"
 download "$VAD_NAME"   "https://huggingface.co/ggml-org/whisper-vad/resolve/main/$VAD_NAME"
 
-command -v claude >/dev/null || echo "⚠️  claude CLI не найден — заметки не сгенерируются (или задай NOTES_CMD)."
+command -v claude >/dev/null || echo "ℹ️  Для заметок подключи агента: meetrec → Настройки (⌘,) → «Агент» (см. README)."
 echo "✅ Готово"

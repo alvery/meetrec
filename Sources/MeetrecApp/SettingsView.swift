@@ -3,14 +3,17 @@ import SwiftUI
 
 /// Окно настроек (⌘,): основные и действия над транскриптом.
 struct SettingsView: View {
+    static let tabKey = "settingsTab"
+    @AppStorage(SettingsView.tabKey) private var tab = "general"
+
     var body: some View {
-        TabView {
+        TabView(selection: $tab) {
             GeneralSettings()
-                .tabItem { Label("Основные", systemImage: "gearshape") }
+                .tabItem { Label("Основные", systemImage: "gearshape") }.tag("general")
             ActionsSettings()
-                .tabItem { Label("Действия", systemImage: "sparkles") }
+                .tabItem { Label("Действия", systemImage: "sparkles") }.tag("actions")
             GatewaySettings()
-                .tabItem { Label("Агент", systemImage: "network") }
+                .tabItem { Label("Агент", systemImage: "network") }.tag("agent")
         }
         .frame(width: 760, height: 520)
         // Приложение без Dock-иконки: окно настроек (в т.ч. по ⌘,) должно выйти поверх остальных.
