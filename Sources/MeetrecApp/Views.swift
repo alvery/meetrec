@@ -20,8 +20,24 @@ struct MeetrecApp: App {
 
 /// Метка по фазам: запись → «Записать?» → обработка → ошибка → встреча идёт → скоро → простой.
 /// В строке меню она монохромная (template), поэтому фазы различаются формой символа и текстом.
+/// Что показывать в строке меню о встрече. По умолчанию — только время: на MacBook с вырезом
+/// macOS молча прячет иконки, которые не влезли слева от него, и длинная метка пропадает целиком.
+enum LabelMode: String, CaseIterable, Identifiable {
+    case icon, time, titleAndTime
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .icon: return "Только иконка"
+        case .time: return "Время до встречи"
+        case .titleAndTime: return "Название и время"
+        }
+    }
+    static let storageKey = "menuBarLabelMode"
+}
+
 struct MenuBarLabel: View {
     @ObservedObject var state: AppState
+    @AppStorage(LabelMode.storageKey) private var mode: LabelMode = .time
     static let symbol = "waveform"
 
     var body: some View {
@@ -44,16 +60,15 @@ struct MenuBarLabel: View {
         if state.promptEvent != nil { return ("record.circle", "Записать?", "встреча идёт, записать?") }
         if let p = state.processingMeeting { return (Self.symbol, "⋯", "делаю заметки: \(p.title)") }
         if state.unseenFailure { return (Self.symbol, "!", "не удалось сделать заметки") }
-        if let e = state.event {
-            // Коротко: на MacBook с вырезом длинная метка уходит под него и пропадает.
-            let name = Format.short(e.title)
+        if let e = state.event, mode != .icon {
+            let prefix = mode == .titleAndTime ? "\(Format.short(e.title)) · " : ""
             if e.isInProgress(at: now) {
                 let left = e.end.timeIntervalSince(now)
-                return (Self.symbol, "\(name) · ещё \(Format.compact(left))", "\(e.title) идёт, ещё \(Format.minutes(left))")
+                return (Self.symbol, "\(prefix)ещё \(Format.compact(left))", "\(e.title) идёт, ещё \(Format.minutes(left))")
             }
             let until = e.start.timeIntervalSince(now)
             if until <= 3600 {
-                return (Self.symbol, "\(name) · \(Format.compact(until))", "\(e.title) через \(Format.minutes(until))")
+                return (Self.symbol, "\(prefix)\(Format.compact(until))", "\(e.title) через \(Format.minutes(until))")
             }
         }
         return (Self.symbol, nil, "нет встреч")
@@ -360,10 +375,14 @@ struct RecentRow: View {
 
 struct FooterSection: View {
     @EnvironmentObject var state: AppState
+    @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .time
 
     var body: some View {
         HStack {
             Menu {
+                Picker("В строке меню", selection: $labelMode) {
+                    ForEach(LabelMode.allCases) { Text($0.title).tag($0) }
+                }
                 Toggle("Запускать при входе", isOn: Binding(get: { state.launchAtLogin },
                                                             set: { state.launchAtLogin = $0 }))
                 Button("Открыть папку встреч") { state.open(state.meetingsRoot) }
