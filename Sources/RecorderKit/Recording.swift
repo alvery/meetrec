@@ -142,3 +142,26 @@ public func defaultInputInUse() -> Bool {
     guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &running) == noErr else { return false }
     return running != 0
 }
+
+/// Микрофон пишет какой-то другой процесс (Zoom/Meet/…), не мы. В отличие от defaultInputInUse,
+/// работает и во время нашей записи: по списку аудиопроцессов Core Audio (macOS 14+).
+public func otherProcessUsingInput() -> Bool {
+    let me = ProcessInfo.processInfo.processIdentifier
+    var addr = Devices.address(kAudioHardwarePropertyProcessObjectList)
+    var size = UInt32(0)
+    let system = AudioObjectID(kAudioObjectSystemObject)
+    guard AudioObjectGetPropertyDataSize(system, &addr, 0, nil, &size) == noErr, size > 0 else { return false }
+    var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+    guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return false }
+    for id in ids {
+        var pid = pid_t(0)
+        var pidSize = UInt32(MemoryLayout<pid_t>.size)
+        var pidAddr = Devices.address(kAudioProcessPropertyPID)
+        guard AudioObjectGetPropertyData(id, &pidAddr, 0, nil, &pidSize, &pid) == noErr, pid != me else { continue }
+        var running = UInt32(0)
+        var runSize = UInt32(MemoryLayout<UInt32>.size)
+        var runAddr = Devices.address(kAudioProcessPropertyIsRunningInput)
+        if AudioObjectGetPropertyData(id, &runAddr, 0, nil, &runSize, &running) == noErr, running != 0 { return true }
+    }
+    return false
+}

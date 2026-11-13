@@ -12,10 +12,12 @@ enum MeetingStatus: Equatable {
     case recording
     case processing(stage: String?)
     case done
+    case partial // результаты есть, но последний прогон с ошибкой (часть действий / повтор упали)
     case failed
     case pending // записано, но не обработано
 
     var isProcessing: Bool { if case .processing = self { return true } else { return false } }
+    var isBusy: Bool { self == .recording || isProcessing }
 }
 
 /// Встреча на диске: папка в ~/Meetings.
@@ -26,11 +28,14 @@ struct MeetingFolder: Identifiable, Equatable {
     let status: MeetingStatus
     /// Готовые результаты действий (notes.md, action-items.md, …) в порядке действий.
     let results: [URL]
+    /// Причина ошибки последнего прогона (строка «❌ …» из process.log) — для .failed / .partial.
+    let error: String?
     var id: URL { url }
     var transcript: URL { url.appendingPathComponent("transcript.md") }
     var log: URL { url.appendingPathComponent("process.log") }
     /// Главный результат: первое действие, иначе транскрипт.
     var primaryResult: URL { results.first ?? transcript }
+    var hasTranscript: Bool { FileManager.default.fileExists(atPath: transcript.path) }
 }
 
 // MARK: - Уровни звука
@@ -42,15 +47,23 @@ final class Meter: ObservableObject {
     static let shared = Meter()
     @Published private(set) var me: Float = 0
     @Published private(set) var them: Float = 0
+    /// Сколько секунд подряд молчит дорожка «Они».
     @Published private(set) var themSilentSeconds: Double = 0
+    /// «Они» звучали с начала записи — тогда долгая тишина (свой монолог, демонстрация) — норма.
+    @Published private(set) var themHeard = false
+
+    /// Предупреждать: ни разу не звучали за 30 с, или пропали на 5 минут посреди созвона (сменился выход звука).
+    var themSilenceAlarm: Bool { themSilentSeconds >= (themHeard ? 300 : 30) }
 
     func update(me peakMe: Float, them peakThem: Float, dt: Double) {
         me = Self.normalized(peakMe)
         them = Self.normalized(peakThem)
-        themSilentSeconds = peakThem < 0.001 ? themSilentSeconds + dt : 0 // < −60 dBFS
+        let loud = peakThem >= 0.001 // > −60 dBFS
+        if loud, !themHeard { themHeard = true }
+        themSilentSeconds = loud ? 0 : themSilentSeconds + dt
     }
 
-    func reset() { me = 0; them = 0; themSilentSeconds = 0 }
+    func reset() { me = 0; them = 0; themSilentSeconds = 0; themHeard = false }
 
     /// Пик → 0…1 по шкале −50…0 dBFS: тихая речь собеседника (пик 0.02–0.1) видна, а не «пустая».
     static func normalized(_ peak: Float) -> Float {
@@ -82,6 +95,15 @@ enum Permission: String, Identifiable, CaseIterable {
         }
     }
 
+    /// Ещё не спрашивали — кнопка «Разрешить» (системный запрос), а не «Открыть настройки».
+    var canRequest: Bool {
+        switch self {
+        case .microphone: return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+        case .systemAudio: return Recording.audioCapturePermissionStatus() == "unknown"
+        case .calendar, .notifications: return false
+        }
+    }
+
     var settingsURL: URL {
         let base = "x-apple.systempreferences:com.apple.preference."
         switch self {
@@ -94,6 +116,13 @@ enum Permission: String, Identifiable, CaseIterable {
 }
 
 // MARK: - Состояние приложения
+
+/// Подсказка «Остановить запись?»: созвон закончился / началась следующая встреча.
+struct StopSuggestion: Equatable {
+    let key: String       // причина; закрытую ✕ больше не показываем в этой записи
+    let text: String
+    let next: MeetingEvent? // началась следующая встреча — можно сразу подключиться
+}
 
 @MainActor
 final class AppState: ObservableObject {
@@ -113,6 +142,10 @@ final class AppState: ObservableObject {
     @Published private(set) var promptEvent: MeetingEvent?
     /// Встреча, для которой показана плашка «Через минуту — Подключиться».
     @Published private(set) var joinPanelEvent: MeetingEvent?
+    /// Во время записи: похоже, пора остановить.
+    @Published private(set) var stopSuggestion: StopSuggestion?
+    /// Микрофон занят созвоном (Zoom/Meet/…) — значит, уже подключился.
+    @Published private(set) var callActive = false
     /// Меняется раз в минуту — чтобы обратный отсчёт в метке и окне не застывал.
     @Published private(set) var minuteTick = 0
 
@@ -148,6 +181,16 @@ final class AppState: ObservableObject {
     private var promptShownAt: Date?
     private var started: Set<URL> = [] // обработки, запущенные приложением (до появления замка на диске)
     private var audioPermissionWarned = false
+    // Для подсказки «Остановить?»
+    private var recordingEvent: MeetingEvent?
+    private var recordingStartedAt: Date?
+    private var callSeenWhileRecording = false
+    private var callIdleSince: Date?
+    private var stopDismissed: Set<String> = []
+    private var permissionRequestInFlight = false
+    /// Системный звук уже запрашивали в этом запуске: preflight TCC отстаёт от ответа пользователя,
+    /// так что «unknown» после запроса — не повод показывать «нет доступа».
+    private var audioRequested = false
     private var peakMe: Float = 0, peakThem: Float = 0
     private var levelTicks = 0
 
@@ -158,6 +201,8 @@ final class AppState: ObservableObject {
         Task {
             _ = await calendar.requestAccess()
             tick()
+            // Микрофон и системный звук — сразу при первом запуске, а не посреди первого созвона.
+            requestRecordingPermissions()
         }
         tickTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
             Task { @MainActor in AppState.shared.tick() }
@@ -192,10 +237,16 @@ final class AppState: ObservableObject {
         }
         if let j = joinPanelEvent, now > j.start.addingTimeInterval(180) { joinPanelEvent = nil }
 
+        // Созвон = кто-то, кроме нас, пишет микрофон (любой, не только системный по умолчанию).
+        // Запасной признак вне записи — занятость микрофона по умолчанию.
+        let call = otherProcessUsingInput() || (!isRecording && defaultInputInUse())
+        assign(\.callActive, call)
+        if isRecording { updateStopSuggestion(now: now, main: main, call: call) }
+
         // Встреча идёт и Zoom/Meet занял микрофон — предложить запись (один раз на встречу).
         if !isRecording, !isStarting, let e = main,
            e.start.addingTimeInterval(-60) <= now, now < e.end,
-           !prompted.contains(e.id), defaultInputInUse() {
+           !prompted.contains(e.id), call {
             prompted.insert(e.id)
             promptEvent = e
             promptShownAt = now
@@ -221,12 +272,53 @@ final class AppState: ObservableObject {
         Hotkey.shared.refreshTrust()
     }
 
+    /// Подсказка «Остановить запись?»: созвон ушёл с микрофона на минуту (только если он был
+    /// во время записи — очная встреча без Zoom так не сработает), запись пережила встречу на 2 мин
+    /// без созвона, или началась следующая встреча.
+    private func updateStopSuggestion(now: Date, main: MeetingEvent?, call: Bool) {
+        if call { callSeenWhileRecording = true; callIdleSince = nil } else if callIdleSince == nil { callIdleSince = now }
+        var s: StopSuggestion?
+        if let m = main, m.id != recordingEvent?.id, m.isInProgress(at: now), m.start > (recordingStartedAt ?? now) {
+            s = StopSuggestion(key: "next-\(m.id)", text: "Началась «\(m.title)»", next: m)
+        } else if callSeenWhileRecording, let idle = callIdleSince, now.timeIntervalSince(idle) >= 60 {
+            s = StopSuggestion(key: "idle", text: "Созвон, похоже, закончился — микрофон свободен", next: nil)
+        } else if let r = recordingEvent, now >= r.end.addingTimeInterval(call ? 600 : 120) {
+            // Микрофон кем-то занят (диктовка, фоновый helper) — всё равно спросить, но позже.
+            s = StopSuggestion(key: "ended", text: "Встреча закончилась в \(Format.time.string(from: r.end))", next: nil)
+        }
+        if let k = s?.key, stopDismissed.contains(k) { s = nil }
+        assign(\.stopSuggestion, s)
+    }
+
+    func dismissStop() {
+        if let k = stopSuggestion?.key { stopDismissed.insert(k) }
+        stopSuggestion = nil
+        updatePanel()
+    }
+
+    /// Запросить микрофон и системный звук (если ещё не спрашивали). Запросы блокируют поток — не на главном.
+    func requestRecordingPermissions() {
+        guard !permissionRequestInFlight, Permission.microphone.canRequest || Permission.systemAudio.canRequest else { return }
+        permissionRequestInFlight = true
+        Task.detached {
+            let micOK = Recording.requestMicAccess()
+            let audioWarning = micOK ? Recording.ensureAudioCapturePermission() : nil
+            await MainActor.run {
+                let state = AppState.shared
+                state.permissionRequestInFlight = false
+                if micOK { state.audioRequested = true; state.audioPermissionWarned = audioWarning != nil }
+                state.refreshPermissions()
+            }
+        }
+    }
+
     func refreshPermissions() {
         var missing: [Permission] = []
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .denied { missing.append(.microphone) }
+        let mic = AVCaptureDevice.authorizationStatus(for: .audio)
+        if mic == .denied || mic == .notDetermined { missing.append(.microphone) }
         let audio = Recording.audioCapturePermissionStatus()
         if audio == "authorized" { audioPermissionWarned = false } // выдали в Настройках — предупреждение снять
-        if audio == "denied" || audioPermissionWarned { missing.append(.systemAudio) }
+        if audio == "denied" || (audio == "unknown" && !audioRequested) || audioPermissionWarned { missing.append(.systemAudio) }
         if !calendar.refreshAuthorization(), EKEventStore.authorizationStatus(for: .event) != .notDetermined {
             missing.append(.calendar)
         }
@@ -286,7 +378,10 @@ final class AppState: ObservableObject {
     /// а «Подключиться» к следующей встрече (встречи подряд) — нужна.
     func updatePanel() {
         updateBlink()
-        if let e = promptEvent, !isRecording, !isStarting {
+        // «Остановить?» без следующей встречи не перекрывает «Подключиться» к следующей.
+        if isRecording, let s = stopSuggestion, s.next != nil || joinPanelEvent == nil {
+            FloatingPanel.shared.show(.stop(s))
+        } else if let e = promptEvent, !isRecording, !isStarting {
             FloatingPanel.shared.show(.prompt(e))
         } else if let e = joinPanelEvent {
             FloatingPanel.shared.show(.join(e))
@@ -326,6 +421,7 @@ final class AppState: ObservableObject {
             return
         }
         audioPermissionWarned = audioWarning != nil
+        audioRequested = true
         refreshPermissions()
         do {
             let rec = try Recording(dir: dir)
@@ -334,6 +430,12 @@ final class AppState: ObservableObject {
             recording = rec
             recordingTitle = event?.title
             recordingDir = dir
+            recordingEvent = event
+            recordingStartedAt = Date()
+            callSeenWhileRecording = false
+            callIdleSince = nil
+            stopDismissed = []
+            stopSuggestion = nil
             isRecording = true
             elapsedSeconds = 0
             Meter.shared.reset()
@@ -382,13 +484,21 @@ final class AppState: ObservableObject {
         Meter.shared.reset()
         let title = recordingTitle ?? Self.title(of: rec.dir)
         recordingTitle = nil
+        recordingEvent = nil
+        stopSuggestion = nil
         updatePanel()
         process(rec.dir, title: title)
     }
 
     // MARK: - Обработка (scripts/process.sh из репозитория)
 
-    func process(_ dir: URL, title: String) {
+    /// Повтор: транскрипт уже есть — только действия (ошибка шлюза не стоит минут повторной расшифровки).
+    func retry(_ dir: URL, title: String) {
+        let hasTranscript = FileManager.default.fileExists(atPath: dir.appendingPathComponent("transcript.md").path)
+        process(dir, title: title, actionsOnly: hasTranscript)
+    }
+
+    func process(_ dir: URL, title: String, actionsOnly: Bool = false) {
         guard !started.contains(dir), dir != recordingDir,
               !FileManager.default.fileExists(atPath: dir.appendingPathComponent(".processing").path)
         else { return }
@@ -398,7 +508,7 @@ final class AppState: ObservableObject {
         }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = ["\(root)/scripts/process.sh", dir.path]
+        p.arguments = ["\(root)/scripts/process.sh"] + (actionsOnly ? ["--actions-only"] : []) + [dir.path]
         var env = ProcessInfo.processInfo.environment
         // GUI-приложения не видят PATH из shell — добавляем Homebrew (whisper-cli) явно.
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
@@ -412,17 +522,21 @@ final class AppState: ObservableObject {
                 let state = AppState.shared
                 state.started.remove(dir)
                 state.refreshMeetings()
-                let results = Self.results(in: dir)
-                if ok {
+                let m = Self.manifest(in: dir)
+                let error = Self.logInfo(dir).error
+                // Часть действий выполнилась в этом прогоне — это «готово с оговоркой», а не ошибка:
+                // клик открывает заметки, в тексте — что не выполнилось.
+                let partial = !ok && !m.ok.isEmpty && Self.manifestNewer(than: runStarted, in: dir)
+                if ok || partial {
                     state.unseenFailure = false
                     if !state.windowVisible { state.unseenNotes = true; state.unseenNotesSince = Date() }
-                    Notifier.notesReady(title: title, results: results.isEmpty ? [dir.appendingPathComponent("transcript.md")] : results,
-                                        quiet: state.isRecording)
+                    Notifier.notesReady(title: title, dir: dir,
+                                        results: m.ok.isEmpty ? [dir.appendingPathComponent("transcript.md")] : m.ok,
+                                        failed: partial ? m.failed : [], quiet: state.isRecording)
                 } else {
                     state.unseenNotes = false
                     if !state.windowVisible { state.unseenFailure = true }
-                    let partial = !results.isEmpty && Self.manifestNewer(than: runStarted, in: dir)
-                    Notifier.failed(title: title, dir: dir, partial: partial, quiet: state.isRecording)
+                    Notifier.failed(title: title, dir: dir, reason: error, quiet: state.isRecording)
                 }
             }
         }
@@ -448,21 +562,24 @@ final class AppState: ObservableObject {
             .prefix(5)
             .map { dir, date in
                 let results = Self.results(in: dir)
-                return MeetingFolder(url: dir, title: Self.title(of: dir), date: date,
-                                     status: status(of: dir, results: results), results: results)
+                let log = Self.logInfo(dir)
+                let status = status(of: dir, results: results, log: log)
+                return MeetingFolder(url: dir, title: Self.title(of: dir), date: date, status: status, results: results,
+                                     error: status == .failed || status == .partial ? log.error : nil)
             }
         assign(\.meetings, list)
     }
 
-    private func status(of dir: URL, results: [URL]) -> MeetingStatus {
+    private func status(of dir: URL, results: [URL], log: LogInfo) -> MeetingStatus {
         let fm = FileManager.default
         if dir == recordingDir { return .recording }
-        let log = Self.logInfo(dir)
         if started.contains(dir) || fm.fileExists(atPath: dir.appendingPathComponent(".processing").path) {
             return .processing(stage: log.stage)
         }
-        // Есть результаты действий — встреча «готова», даже если часть действий / повтор упали.
-        if !results.isEmpty { return .done }
+        // Есть результаты — «готово»; последний прогон упал: часть действий в нём выполнилась — «с оговоркой»,
+        // ни одно (туннель, whisper) — «ошибка», хотя заметки прошлого прогона остались.
+        if !results.isEmpty, (log.exitCode ?? 0) == 0 { return .done }
+        if !results.isEmpty, log.actionsSucceeded { return .partial }
         if let code = log.exitCode, code != 0 { return .failed }
         // Действия выключены — готово, когда есть транскрипт и обработка завершилась успешно.
         if log.exitCode == 0, fm.fileExists(atPath: dir.appendingPathComponent("transcript.md").path) { return .done }
@@ -471,20 +588,24 @@ final class AppState: ObservableObject {
 
     /// Результаты действий из results.json, который пишет run_actions.py (имена файлов — уже
     /// нормализованные скриптом). Встречи, обработанные до действий, — notes.md.
-    static func results(in dir: URL) -> [URL] {
+    static func results(in dir: URL) -> [URL] { manifest(in: dir).ok }
+
+    /// results.json: готовые файлы и названия невыполненных действий.
+    static func manifest(in dir: URL) -> (ok: [URL], failed: [String]) {
         let fm = FileManager.default
         struct Manifest: Decodable {
-            struct Item: Decodable { let file: String; let ok: Bool }
+            struct Item: Decodable { let name: String?; let file: String; let ok: Bool }
             let results: [Item]
         }
         if let data = try? Data(contentsOf: dir.appendingPathComponent("results.json")),
            let m = try? JSONDecoder().decode(Manifest.self, from: data) {
-            return m.results.filter(\.ok)
+            let ok = m.results.filter(\.ok)
                 .map { dir.appendingPathComponent($0.file) }
                 .filter { fm.fileExists(atPath: $0.path) }
+            return (ok, m.results.filter { !$0.ok }.map { $0.name ?? $0.file })
         }
         let legacy = dir.appendingPathComponent("notes.md")
-        return fm.fileExists(atPath: legacy.path) ? [legacy] : []
+        return (fm.fileExists(atPath: legacy.path) ? [legacy] : [], [])
     }
 
     /// results.json записан этим прогоном (позже его старта) — значит, действия дошли до конца.
@@ -493,21 +614,25 @@ final class AppState: ObservableObject {
         return (m?.contentModificationDate ?? .distantPast) > date
     }
 
-    /// Последний код выхода и текущая стадия обработки — из хвоста process.log.
-    static func logInfo(_ dir: URL) -> (exitCode: Int32?, stage: String?) {
-        guard let h = try? FileHandle(forReadingFrom: dir.appendingPathComponent("process.log")) else { return (nil, nil) }
+    /// Последний код выхода, текущая стадия и последняя ошибка («❌ …») — из хвоста process.log.
+    struct LogInfo { var exitCode: Int32?; var stage: String?; var error: String?; var actionsSucceeded = false }
+
+    static func logInfo(_ dir: URL) -> LogInfo {
+        guard let h = try? FileHandle(forReadingFrom: dir.appendingPathComponent("process.log")) else { return LogInfo() }
         defer { try? h.close() }
         let size = (try? h.seekToEnd()) ?? 0
-        try? h.seek(toOffset: size > 4096 ? size - 4096 : 0)
+        try? h.seek(toOffset: size > 16384 ? size - 16384 : 0)
         let tail = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
-        var exitCode: Int32?
-        var stage: String?
+        var info = LogInfo()
         for line in tail.split(separator: "\n") {
-            if line.hasPrefix("=== exit ") { exitCode = Int32(line.dropFirst(9).trimmingCharacters(in: .whitespaces)) }
-            if line.hasPrefix("=== process.sh") { exitCode = nil; stage = nil } // начался новый прогон
-            if line.hasPrefix("→ ") { stage = String(line.dropFirst(2)) }
+            if line.hasPrefix("=== exit ") { info.exitCode = Int32(line.dropFirst(9).trimmingCharacters(in: .whitespaces)) }
+            if line.hasPrefix("=== process.sh") { info = LogInfo() } // начался новый прогон
+            if line.hasPrefix("→ ") { info.stage = String(line.dropFirst(2)) }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("❌") { info.error = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces) }
+            if trimmed.hasPrefix("✅ «") { info.actionsSucceeded = true } // строка run_actions.py об успешном действии
         }
-        return (exitCode, stage)
+        return info
     }
 
     func open(_ url: URL) { NSWorkspace.shared.open(url) }

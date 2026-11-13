@@ -45,7 +45,8 @@ struct MenuBarLabel: View {
     var body: some View {
         let c = content
         HStack(spacing: 3) {
-            Image(nsImage: MenuIcon.image(c.icon)).renderingMode(.template)
+            // Запись — красным (не template): видно издалека и на демонстрации, что запись идёт.
+            Image(nsImage: MenuIcon.image(c.icon)).renderingMode(c.icon == .recording ? .original : .template)
             if mode != .icon, let text = c.text { Text(text).monospacedDigit() }
         }
         .accessibilityElement(children: .ignore)
@@ -122,7 +123,11 @@ struct PermissionRows: View {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Text(p.text).font(.callout).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 4)
-                Button("Открыть настройки") { state.open(p.settingsURL) }.controlSize(.small)
+                if p.canRequest {
+                    Button("Разрешить") { state.requestRecordingPermissions() }.controlSize(.small)
+                } else {
+                    Button("Открыть настройки") { state.open(p.settingsURL) }.controlSize(.small)
+                }
             }
         }
     }
@@ -153,8 +158,9 @@ struct EventHero: View {
         VStack(alignment: .leading, spacing: 6) {
             if let e = state.event {
                 let inProgress = e.isInProgress(at: now)
-                // Главное действие по фазе: до начала — «Подключиться», когда идёт — «Записать».
-                let recordIsPrimary = inProgress || state.promptEvent != nil || e.joinURL == nil
+                // Главное действие: «Подключиться», пока созвон не занял микрофон (в т.ч. если опаздываешь
+                // на уже идущую встречу); «Записать» — когда уже подключился.
+                let recordIsPrimary = e.joinURL == nil || state.promptEvent != nil || (inProgress && state.callActive)
                 Text(inProgress ? "СЕЙЧАС · ещё \(Format.minutes(e.end.timeIntervalSince(now)))"
                                 : "ДАЛЕЕ · \(Format.startsIn(e.start, now: now))")
                     .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -242,10 +248,12 @@ struct LevelsView: View {
         VStack(alignment: .leading, spacing: 4) {
             LevelRow(label: "Я", level: meter.me)
             LevelRow(label: "Они", level: meter.them)
-            if meter.themSilentSeconds >= 30 {
+            if meter.themSilenceAlarm {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("«Они» молчат \(Int(meter.themSilentSeconds)) с — нет звука или нет разрешения на системный звук?")
+                    Text(meter.themHeard
+                         ? "«Они» молчат \(Int(meter.themSilentSeconds / 60)) мин — сменился выход звука?"
+                         : "«Они» ни разу не прозвучали за \(Int(meter.themSilentSeconds)) с — нет звука или нет разрешения на системный звук?")
                         .font(.caption).fixedSize(horizontal: false, vertical: true)
                     Button("Настройки") { state.open(Permission.systemAudio.settingsURL) }.controlSize(.small)
                 }
@@ -313,43 +321,60 @@ struct RecentSection: View {
     }
 }
 
-/// Клик по строке — главное действие (заметки / лог ошибки / обработать); остальное — в контекстном меню.
+/// Клик по строке — главное действие (заметки / лог ошибки / обработать); при ошибке — причина
+/// и «Повторить» прямо в строке; остальное — в контекстном меню.
 struct RecentRow: View {
     @EnvironmentObject var state: AppState
     let meeting: MeetingFolder
     @State private var hovered = false
 
     var body: some View {
-        Button(action: primary) {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(meeting.title).lineLimit(1)
-                    Text(Format.day(meeting.date)).font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 6) {
+            Button(action: primary) {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(meeting.title).lineLimit(1)
+                        if let err = meeting.error {
+                            Text(err).font(.caption).foregroundStyle(meeting.status == .failed ? .red : .orange)
+                                .lineLimit(2).help(err)
+                        } else {
+                            Text(Format.day(meeting.date)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    statusIcon
                 }
-                Spacer()
-                statusIcon
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-            .contentShape(Rectangle())
-            .background(RoundedRectangle(cornerRadius: 5).fill(hovered ? Color.primary.opacity(0.08) : .clear))
+            .buttonStyle(.plain)
+            .help(hint)
+            if meeting.status == .failed || meeting.status == .partial {
+                Button { state.retry(meeting.url, title: meeting.title) } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless)
+                    .help(meeting.hasTranscript ? "Повторить действия (без повторной расшифровки)" : "Обработать заново")
+                    .accessibilityLabel("Повторить")
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(RoundedRectangle(cornerRadius: 5).fill(hovered ? Color.primary.opacity(0.08) : .clear))
         .onHover { hovered = $0 }
-        .help(hint)
         .contextMenu {
             ForEach(meeting.results, id: \.self) { file in
                 Button("Открыть \(file.lastPathComponent)") { state.open(file) }
             }
             Button("Открыть транскрипт") { state.open(meeting.transcript) }
-                .disabled(!FileManager.default.fileExists(atPath: meeting.transcript.path))
+                .disabled(!meeting.hasTranscript)
             Divider()
             Button("Открыть папку") { state.open(meeting.url) }
             Button("Открыть лог обработки") { state.open(meeting.log) }
             Divider()
-            Button("Обработать заново") { state.process(meeting.url, title: meeting.title) }
-                .disabled(meeting.status == .recording || meeting.status.isProcessing)
+            Button("Повторить действия") { state.process(meeting.url, title: meeting.title, actionsOnly: true) }
+                .disabled(meeting.status.isBusy || !meeting.hasTranscript)
+            Button("Обработать заново (с расшифровкой)") { state.process(meeting.url, title: meeting.title) }
+                .disabled(meeting.status.isBusy)
         }
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(meeting.title), \(Format.day(meeting.date)), \(statusText)")
         .accessibilityHint(hint)
     }
@@ -359,6 +384,7 @@ struct RecentRow: View {
         case .recording: Image(systemName: "record.circle.fill").foregroundStyle(.red)
         case .processing: ProgressView().controlSize(.small)
         case .done: Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
+        case .partial: Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
         case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
         case .pending: Image(systemName: "circle.dashed").foregroundStyle(.secondary)
         }
@@ -369,6 +395,7 @@ struct RecentRow: View {
         case .recording: return "идёт запись"
         case .processing: return "обрабатывается"
         case .done: return "готово"
+        case .partial: return "готово, часть действий не выполнилась"
         case .failed: return "ошибка обработки"
         case .pending: return "не обработана"
         }
@@ -376,7 +403,7 @@ struct RecentRow: View {
 
     private var hint: String {
         switch meeting.status {
-        case .done: return "Открыть \(meeting.primaryResult.lastPathComponent)"
+        case .done, .partial: return "Открыть \(meeting.primaryResult.lastPathComponent)"
         case .failed: return "Открыть лог ошибки"
         case .pending: return "Сделать заметки"
         case .recording, .processing: return "Открыть папку"
@@ -385,7 +412,7 @@ struct RecentRow: View {
 
     private func primary() {
         switch meeting.status {
-        case .done: state.open(meeting.primaryResult)
+        case .done, .partial: state.open(meeting.primaryResult)
         case .failed: state.open(meeting.log)
         case .pending: state.process(meeting.url, title: meeting.title)
         case .recording, .processing: state.open(meeting.url)

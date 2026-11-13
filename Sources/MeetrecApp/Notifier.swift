@@ -7,6 +7,7 @@ import UserNotifications
 enum Notifier {
     enum Category {
         static let notes = "NOTES"     // заметки готовы
+        static let partial = "PARTIAL" // готово, но часть действий не выполнилась
         static let failed = "FAILED"   // обработка упала
     }
     enum Action {
@@ -26,6 +27,9 @@ enum Notifier {
         }
         center.setNotificationCategories([
             UNNotificationCategory(identifier: Category.notes, actions: [], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: Category.partial,
+                                   actions: [action(Action.retry, "Повторить", "arrow.clockwise")],
+                                   intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: Category.failed,
                                    actions: [action(Action.openLog, "Открыть лог", "doc.text.magnifyingglass"),
                                              action(Action.retry, "Повторить", "arrow.clockwise")],
@@ -33,16 +37,18 @@ enum Notifier {
         ])
     }
 
-    /// Клик открывает главный результат (первое действие); в тексте — что получилось.
-    static func notesReady(title: String, results: [URL], quiet: Bool) {
+    /// Клик открывает главный результат (первое действие); в тексте — что получилось и что нет.
+    static func notesReady(title: String, dir: URL, results: [URL], failed: [String], quiet: Bool) {
         let names = results.map { $0.deletingPathExtension().lastPathComponent }.joined(separator: ", ")
-        post(title: title, body: "Готово: \(names)", category: Category.notes,
-             info: ["path": results.first?.path ?? ""], sound: !quiet)
+        let body = "Готово: \(names)" + (failed.isEmpty ? "" : "; не выполнилось: \(failed.joined(separator: ", "))")
+        post(title: title, body: body, category: failed.isEmpty ? Category.notes : Category.partial,
+             info: ["path": results.first?.path ?? "", "dir": dir.path, "title": title], sound: !quiet)
     }
 
-    static func failed(title: String, dir: URL, partial: Bool, quiet: Bool) {
-        post(title: title, body: partial ? "Часть действий не выполнилась" : "Не удалось сделать заметки",
-             category: Category.failed,
+    /// В тексте — причина из лога («Туннель не поднялся», «HTTP 401…»), а не просто «ошибка».
+    static func failed(title: String, dir: URL, reason: String?, quiet: Bool) {
+        let body = reason.map { "Не удалось сделать заметки: \($0)" } ?? "Не удалось сделать заметки"
+        post(title: title, body: String(body.prefix(200)), category: Category.failed,
              info: ["dir": dir.path, "title": title], sound: !quiet)
     }
 
@@ -83,16 +89,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let isDefault = action == UNNotificationDefaultActionIdentifier
         Task { @MainActor in
             let state = AppState.shared
+            let dir = (info["dir"] as? String).map { URL(fileURLWithPath: $0) }
+            let title = info["title"] as? String
             switch content.categoryIdentifier {
-            case Notifier.Category.notes where isDefault:
+            case _ where action == Notifier.Action.retry:
+                if let dir { state.retry(dir, title: title ?? AppState.title(of: dir)) }
+            case Notifier.Category.notes where isDefault, Notifier.Category.partial where isDefault:
                 if let path = info["path"] as? String { state.open(URL(fileURLWithPath: path)) }
                 state.notesSeen()
             case Notifier.Category.failed:
-                guard let path = info["dir"] as? String else { break }
-                let dir = URL(fileURLWithPath: path)
-                if action == Notifier.Action.retry {
-                    state.process(dir, title: info["title"] as? String ?? AppState.title(of: dir))
-                } else if action == Notifier.Action.openLog || isDefault {
+                guard let dir else { break }
+                if action == Notifier.Action.openLog || isDefault {
                     state.open(dir.appendingPathComponent("process.log"))
                 }
             default:

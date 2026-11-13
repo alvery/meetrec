@@ -17,6 +17,16 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/.build/release/MeetrecApp" "$APP/Contents/MacOS/meetrec"
 VERSION="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 
+# Иконка рисуется кодом (scripts/make-icon.swift) — пересобираем, только если скрипт изменился.
+ICON="$ROOT/.build/AppIcon.icns"
+if [[ ! -f "$ICON" || "$ROOT/scripts/make-icon.swift" -nt "$ICON" ]]; then
+  ICONSET="$ROOT/.build/AppIcon.iconset"
+  rm -rf "$ICONSET"
+  swift "$ROOT/scripts/make-icon.swift" "$ICONSET" && iconutil -c icns "$ICONSET" -o "$ICON" \
+    || echo "⚠️  иконка не собралась — приложение будет без иконки"
+fi
+[[ -f "$ICON" ]] && cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -26,6 +36,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>meetrec</string>
   <key>CFBundleDisplayName</key><string>meetrec</string>
   <key>CFBundleExecutable</key><string>meetrec</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.2</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>

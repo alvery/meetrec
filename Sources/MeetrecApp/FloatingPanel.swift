@@ -5,11 +5,13 @@ import SwiftUI
 enum PanelKind: Equatable {
     case join(MeetingEvent)   // встреча через минуту — «Подключиться»
     case prompt(MeetingEvent) // встреча идёт, микрофон занят — «Записать?»
+    case stop(StopSuggestion) // идёт запись, а созвон закончился / началась следующая встреча
 
     var id: String {
         switch self {
         case .join(let e): return "join-\(e.id)"
         case .prompt(let e): return "prompt-\(e.id)"
+        case .stop(let s): return "stop-\(s.key)"
         }
     }
 }
@@ -75,11 +77,25 @@ struct PanelView: View {
         HStack(spacing: 10) {
             Image(systemName: icon).font(.title2).foregroundStyle(iconColor)
             VStack(alignment: .leading, spacing: 2) {
-                Text(event.title).font(.headline).lineLimit(1)
+                Text(headline).font(.headline).lineLimit(1)
                 Text(subtitle).font(.callout).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 8)
             switch kind {
+            case .stop(let s):
+                if let next = s.next, next.joinURL != nil {
+                    Button { state.stopRecording(reason: "плашка: \(s.key)"); state.join(next) } label: {
+                        Label("Стоп и подключиться", systemImage: "video")
+                    }
+                    .controlSize(.large)
+                }
+                Button { state.stopRecording(reason: "плашка: \(s.key)") } label: {
+                    Label("Остановить", systemImage: "stop.fill")
+                }
+                .buttonStyle(.borderedProminent).controlSize(.large)
+                Button { state.dismissStop() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless).controlSize(.large)
+                    .help("Продолжить запись").accessibilityLabel("Продолжить запись")
             case .prompt(let e):
                 Button { state.startRecording(for: e) } label: {
                     Label("Записать", systemImage: "record.circle")
@@ -100,25 +116,38 @@ struct PanelView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .frame(width: 400)
+        .frame(width: wide ? 520 : 400)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.1)))
     }
 
-    private var event: MeetingEvent {
-        switch kind { case .join(let e), .prompt(let e): return e }
+    /// Три кнопки («Стоп и подключиться», «Остановить», ✕) в 400 pt не влезают.
+    private var wide: Bool {
+        if case .stop(let s) = kind, s.next?.joinURL != nil { return true } else { return false }
+    }
+
+    private var headline: String {
+        switch kind {
+        case .join(let e), .prompt(let e): return e.title
+        case .stop: return "Остановить запись?"
+        }
     }
 
     private var icon: String {
-        if case .prompt = kind { return "record.circle" } else { return "video.circle" }
+        switch kind {
+        case .prompt: return "record.circle"
+        case .join: return "video.circle"
+        case .stop: return "stop.circle"
+        }
     }
 
     private var iconColor: Color {
-        if case .prompt = kind { return .red } else { return .accentColor }
+        if case .join = kind { return .accentColor } else { return .red }
     }
 
     private var subtitle: String {
         switch kind {
+        case .stop(let s): return s.text
         case .prompt: return "Встреча идёт, микрофон занят — записать?"
         case .join(let e):
             let t = e.start.timeIntervalSinceNow

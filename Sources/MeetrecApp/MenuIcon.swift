@@ -20,14 +20,14 @@ enum IconState: Hashable {
 enum MenuIcon {
     private static var cache: [IconState: NSImage] = [:]
 
-    /// Template-картинка: macOS сама красит её под светлую/тёмную строку меню.
+    /// Template-картинка: macOS сама красит её под светлую/тёмную строку меню (кроме записи — она красная).
     static func image(_ state: IconState) -> NSImage {
         if let cached = cache[state] { return cached }
         let renderer = ImageRenderer(content: IconGlyph(state: state).frame(width: 18, height: 18))
         renderer.scale = 2
         let image = renderer.nsImage ?? NSImage(size: NSSize(width: 18, height: 18))
         image.size = NSSize(width: 18, height: 18)
-        image.isTemplate = true
+        image.isTemplate = state != .recording // запись — красная, остальное красит macOS
         cache[state] = image
         return image
     }
@@ -42,7 +42,7 @@ private struct IconGlyph: View {
             let rect = CGRect(origin: .zero, size: size).insetBy(dx: lw / 2 + 0.6, dy: lw / 2 + 0.6)
             let c = CGPoint(x: rect.midX, y: rect.midY)
             let r = rect.width / 2
-            let ink = Color.black
+            let ink = state == .recording ? Color(red: 1, green: 0.23, blue: 0.19) : Color.black
 
             func ring(_ opacity: Double) {
                 ctx.stroke(Path(ellipseIn: rect), with: .color(ink.opacity(opacity)), lineWidth: lw)

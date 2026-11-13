@@ -7,7 +7,8 @@
 #   Технический лог пишется в process.log; если задан MEETREC_REPORT_HOST — отчёт уходит на сервер.
 #   Переменные из ~/.config/meetrec/env не перекрывают заданные в командной строке.
 #
-# Использование: ./scripts/process.sh ~/Meetings/2026-11-11-153000
+# Использование: ./scripts/process.sh [--actions-only] ~/Meetings/2026-11-11-153000
+#   --actions-only  транскрипт уже есть — только действия (повтор после ошибки шлюза, правка промптов)
 #
 # Переменные окружения (можно задать в ~/.config/meetrec/env):
 #   WHISPER_MODEL        путь к ggml-модели (по умолчанию models/ggml-large-v3-turbo.bin)
@@ -21,7 +22,10 @@
 #   MEETREC_NOTES_HOST   user@server — писать заметки через claude -p на сервере (транскрипт уходит по SSH)
 set -euo pipefail
 
-DIR="${1:?usage: process.sh <meeting-dir>}"
+# Флаг — через окружение: обёртка ниже перезапускает скрипт уже без него в аргументах.
+if [[ "${1:-}" == "--actions-only" ]]; then export MEETREC_ACTIONS_ONLY=1; shift; fi
+ACTIONS_ONLY="${MEETREC_ACTIONS_ONLY:-0}"
+DIR="${1:?usage: process.sh [--actions-only] <meeting-dir>}"
 DIR="$(cd "$DIR" && pwd)"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/config.sh"
@@ -61,22 +65,6 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 trap 'status=$?; rm -f "$DIR"/*.16k.wav; rmdir "$LOCK" 2>/dev/null; echo "=== exit $status"' EXIT
 
-command -v whisper-cli >/dev/null || { echo "❌ whisper-cli не найден. Запусти ./scripts/setup.sh"; exit 1; }
-[[ -f "$MODEL" ]] || { echo "❌ Нет модели $MODEL. Запусти ./scripts/setup.sh"; exit 1; }
-
-# VAD вырезает тишину: дорожки по большей части молчат (пока говорят другие),
-# а на тишине whisper галлюцинирует («Субтитры сделал…»).
-whisper_opts=(-m "$MODEL" -l "$LANG_CODE" -oj -sns) # без -np: он глушит и ошибки
-whisper_help="$(whisper-cli --help 2>&1 || true)" # без пайпа в grep -q: иначе SIGPIPE + pipefail
-if [[ "$whisper_help" != *--vad* ]]; then
-  echo "⚠️  whisper-cli без поддержки VAD — обнови: brew upgrade whisper-cpp"
-elif [[ ! -f "$VAD_MODEL" ]]; then
-  echo "⚠️  VAD-модель не найдена ($VAD_MODEL) — возможны галлюцинации на тишине"
-else
-  whisper_opts+=(--vad -vm "$VAD_MODEL")
-fi
-echo "whisper: ${whisper_opts[*]}"
-
 # Сегменты дорожки по манифесту rec (<track>.segments: «файл<TAB>секунды от начала записи»).
 # Печатает «offset<TAB>путь» по порядку; сегмент берётся как .caf или уже сжатый .m4a.
 # Без манифеста — track.caf, track.1.caf… вплотную друг к другу (offset «-»).
@@ -103,6 +91,25 @@ segments() {
     done
   fi
 }
+
+if [[ "$ACTIONS_ONLY" == 1 && -s "$DIR/transcript.md" ]]; then
+  echo "→ транскрипт уже есть — только действия"
+else
+command -v whisper-cli >/dev/null || { echo "❌ whisper-cli не найден. Запусти ./scripts/setup.sh"; exit 1; }
+[[ -f "$MODEL" ]] || { echo "❌ Нет модели $MODEL. Запусти ./scripts/setup.sh"; exit 1; }
+
+# VAD вырезает тишину: дорожки по большей части молчат (пока говорят другие),
+# а на тишине whisper галлюцинирует («Субтитры сделал…»).
+whisper_opts=(-m "$MODEL" -l "$LANG_CODE" -oj -sns) # без -np: он глушит и ошибки
+whisper_help="$(whisper-cli --help 2>&1 || true)" # без пайпа в grep -q: иначе SIGPIPE + pipefail
+if [[ "$whisper_help" != *--vad* ]]; then
+  echo "⚠️  whisper-cli без поддержки VAD — обнови: brew upgrade whisper-cpp"
+elif [[ ! -f "$VAD_MODEL" ]]; then
+  echo "⚠️  VAD-модель не найдена ($VAD_MODEL) — возможны галлюцинации на тишине"
+else
+  whisper_opts+=(--vad -vm "$VAD_MODEL")
+fi
+echo "whisper: ${whisper_opts[*]}"
 
 for track in mic system; do
   echo "→ $track: конвертирую сегменты в 16 kHz mono"
@@ -139,6 +146,7 @@ done
 
 echo "→ склеиваю дорожки"
 python3 "$ROOT/scripts/merge.py" "$DIR/mic.json" "$DIR/system.json" > "$DIR/transcript.md"
+fi # ACTIONS_ONLY
 
 # Действия (заметки, action items, outline… — настраиваются в приложении): параллельно,
 # каждое — свой .md в папке встречи. Упавшее действие не мешает сжатию; код выхода — в конце.
