@@ -107,8 +107,13 @@ final class AppState: ObservableObject {
     // Разрешения и встречи
     @Published private(set) var missingPermissions: [Permission] = []
     @Published private(set) var meetings: [MeetingFolder] = []
-    /// Обработка упала, а окно с тех пор не открывали — «!» в метке.
+    /// Обработка упала, а окно с тех пор не открывали — «!» в иконке.
     @Published private(set) var unseenFailure = false
+    /// Заметки готовы, а окно с тех пор не открывали — «✓» в иконке.
+    @Published private(set) var unseenNotes = false
+    /// Мигание точки «Записать?» в иконке (таймер работает только пока висит подсказка).
+    @Published private(set) var blink = true
+    private var blinkTimer: Timer?
 
     let meetingsRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Meetings")
     private let calendar = CalendarService()
@@ -183,6 +188,7 @@ final class AppState: ObservableObject {
     /// Окно открыли: всё актуализировать (диск, разрешения), «!» в метке погасить.
     func popoverOpened() {
         unseenFailure = false
+        unseenNotes = false
         tick()
         refreshMeetings()
         refreshPermissions()
@@ -219,6 +225,20 @@ final class AppState: ObservableObject {
         updatePanel()
     }
 
+    /// Мигаем точкой в иконке, пока висит «Записать?»; в остальное время таймера нет.
+    private func updateBlink() {
+        let needed = promptEvent != nil && !isRecording && !isStarting
+        if needed, blinkTimer == nil {
+            blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { _ in
+                Task { @MainActor in AppState.shared.blink.toggle() }
+            }
+        } else if !needed, let t = blinkTimer {
+            t.invalidate()
+            blinkTimer = nil
+            blink = true
+        }
+    }
+
     func dismissJoin() {
         joinPanelEvent = nil
         updatePanel()
@@ -227,6 +247,7 @@ final class AppState: ObservableObject {
     /// Плашка: «Записать?» важнее «Подключиться». Во время записи «Записать?» не нужна,
     /// а «Подключиться» к следующей встрече (встречи подряд) — нужна.
     func updatePanel() {
+        updateBlink()
         if let e = promptEvent, !isRecording, !isStarting {
             FloatingPanel.shared.show(.prompt(e))
         } else if let e = joinPanelEvent {
@@ -344,6 +365,7 @@ final class AppState: ObservableObject {
                 state.started.remove(dir)
                 state.refreshMeetings()
                 if ok {
+                    state.unseenNotes = true
                     Notifier.notesReady(title: title, notes: dir.appendingPathComponent("notes.md"), quiet: state.isRecording)
                 } else {
                     state.unseenFailure = true

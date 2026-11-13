@@ -20,14 +20,14 @@ struct MeetrecApp: App {
 
 /// Метка по фазам: запись → «Записать?» → обработка → ошибка → встреча идёт → скоро → простой.
 /// В строке меню она монохромная (template), поэтому фазы различаются формой символа и текстом.
-/// Что показывать в строке меню о встрече. По умолчанию — только время: на MacBook с вырезом
+/// Что показывать в строке меню рядом с иконкой. По умолчанию — только иконка: на MacBook с вырезом
 /// macOS молча прячет иконки, которые не влезли слева от него, и длинная метка пропадает целиком.
 enum LabelMode: String, CaseIterable, Identifiable {
     case icon, time, titleAndTime
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .icon: return "Только иконка"
+        case .icon: return "Только иконка (кольцо-отсчёт)"
         case .time: return "Время до встречи"
         case .titleAndTime: return "Название и время"
         }
@@ -37,41 +37,47 @@ enum LabelMode: String, CaseIterable, Identifiable {
 
 struct MenuBarLabel: View {
     @ObservedObject var state: AppState
-    @AppStorage(LabelMode.storageKey) private var mode: LabelMode = .time
-    static let symbol = "waveform"
+    @AppStorage(LabelMode.storageKey) private var mode: LabelMode = .icon
 
     var body: some View {
         let c = content
         HStack(spacing: 3) {
-            Image(systemName: c.image)
-            if let text = c.text { Text(text).monospacedDigit() }
+            Image(nsImage: MenuIcon.image(c.icon))
+            if mode != .icon, let text = c.text { Text(text).monospacedDigit() }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("meetrec, " + c.a11y)
     }
 
-    private var content: (image: String, text: String?, a11y: String) {
+    /// Иконка по фазе (приоритет сверху вниз) + необязательный текст для режимов «время» / «название и время».
+    private var content: (icon: IconState, text: String?, a11y: String) {
         _ = state.minuteTick // перерисовка раз в минуту
         let now = Date()
         if state.isRecording {
             let t = Format.timer(state.elapsedSeconds)
-            return ("record.circle.fill", t, "идёт запись \(t)")
+            return (.recording, t, "идёт запись \(t)")
         }
-        if state.promptEvent != nil { return ("record.circle", "Записать?", "встреча идёт, записать?") }
-        if let p = state.processingMeeting { return (Self.symbol, "⋯", "делаю заметки: \(p.title)") }
-        if state.unseenFailure { return (Self.symbol, "!", "не удалось сделать заметки") }
-        if let e = state.event, mode != .icon {
+        if state.promptEvent != nil { return (.prompt(blink: state.blink), "Записать?", "встреча идёт, записать?") }
+        if let p = state.processingMeeting { return (.processing, nil, "делаю заметки: \(p.title)") }
+        if state.unseenFailure { return (.failed, nil, "не удалось сделать заметки") }
+        if state.unseenNotes { return (.done, nil, "заметки готовы") }
+        if let e = state.event {
             let prefix = mode == .titleAndTime ? "\(Format.short(e.title)) · " : ""
             if e.isInProgress(at: now) {
                 let left = e.end.timeIntervalSince(now)
-                return (Self.symbol, "\(prefix)ещё \(Format.compact(left))", "\(e.title) идёт, ещё \(Format.minutes(left))")
+                let duration = max(60, e.end.timeIntervalSince(e.start))
+                let step = Int((left / duration * Double(IconState.steps)).rounded(.up))
+                return (.now(step: min(IconState.steps, max(1, step))), "\(prefix)ещё \(Format.compact(left))",
+                        "\(e.title) идёт, ещё \(Format.minutes(left))")
             }
             let until = e.start.timeIntervalSince(now)
             if until <= 3600 {
-                return (Self.symbol, "\(prefix)\(Format.compact(until))", "\(e.title) через \(Format.minutes(until))")
+                let step = Int(((1 - until / 3600) * Double(IconState.steps)).rounded(.down))
+                return (.soon(step: min(IconState.steps, max(1, step))), "\(prefix)\(Format.compact(until))",
+                        "\(e.title) через \(Format.minutes(until))")
             }
         }
-        return (Self.symbol, nil, "нет встреч")
+        return (.idle, nil, "нет встреч в ближайший час")
     }
 }
 
@@ -375,7 +381,7 @@ struct RecentRow: View {
 
 struct FooterSection: View {
     @EnvironmentObject var state: AppState
-    @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .time
+    @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .icon
 
     var body: some View {
         HStack {
