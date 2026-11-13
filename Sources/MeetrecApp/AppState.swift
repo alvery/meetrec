@@ -24,9 +24,13 @@ struct MeetingFolder: Identifiable, Equatable {
     let title: String
     let date: Date
     let status: MeetingStatus
+    /// Готовые результаты действий (notes.md, action-items.md, …) в порядке действий.
+    let results: [URL]
     var id: URL { url }
-    var notes: URL { url.appendingPathComponent("notes.md") }
+    var transcript: URL { url.appendingPathComponent("transcript.md") }
     var log: URL { url.appendingPathComponent("process.log") }
+    /// Главный результат: первое действие, иначе транскрипт.
+    var primaryResult: URL { results.first ?? transcript }
 }
 
 // MARK: - Уровни звука
@@ -122,7 +126,19 @@ final class AppState: ObservableObject {
     private var unseenNotesSince: Date?
     private var blinkTimer: Timer?
 
-    let meetingsRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Meetings")
+    /// Папка встреч (настраивается в окне настроек), по умолчанию ~/Meetings.
+    @Published private(set) var meetingsRoot: URL = {
+        if let path = UserDefaults.standard.string(forKey: "meetingsRoot"), !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Meetings")
+    }()
+
+    func setMeetingsRoot(_ url: URL) {
+        UserDefaults.standard.set(url.path, forKey: "meetingsRoot")
+        meetingsRoot = url
+        refreshMeetings()
+    }
     private let calendar = CalendarService()
     private var recording: Recording?
     private var tickTimer: Timer?
@@ -384,14 +400,16 @@ final class AppState: ObservableObject {
                 let state = AppState.shared
                 state.started.remove(dir)
                 state.refreshMeetings()
+                let results = Self.results(in: dir)
                 if ok {
                     state.unseenFailure = false
                     if !state.windowVisible { state.unseenNotes = true; state.unseenNotesSince = Date() }
-                    Notifier.notesReady(title: title, notes: dir.appendingPathComponent("notes.md"), quiet: state.isRecording)
+                    Notifier.notesReady(title: title, results: results.isEmpty ? [dir.appendingPathComponent("transcript.md")] : results,
+                                        quiet: state.isRecording)
                 } else {
                     state.unseenNotes = false
                     if !state.windowVisible { state.unseenFailure = true }
-                    Notifier.failed(title: title, dir: dir, quiet: state.isRecording)
+                    Notifier.failed(title: title, dir: dir, partial: !results.isEmpty, quiet: state.isRecording)
                 }
             }
         }
@@ -415,7 +433,9 @@ final class AppState: ObservableObject {
             .map { dir -> (URL, Date) in (dir, (try? dir.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast) }
             .sorted { $0.1 > $1.1 }
             .prefix(5)
-            .map { dir, date in MeetingFolder(url: dir, title: Self.title(of: dir), date: date, status: status(of: dir)) }
+            .map { dir, date in
+                MeetingFolder(url: dir, title: Self.title(of: dir), date: date, status: status(of: dir), results: Self.results(in: dir))
+            }
         assign(\.meetings, list)
     }
 
@@ -426,10 +446,20 @@ final class AppState: ObservableObject {
         if started.contains(dir) || fm.fileExists(atPath: dir.appendingPathComponent(".processing").path) {
             return .processing(stage: log.stage)
         }
-        // Есть заметки — встреча «готова», даже если последний повтор обработки упал.
-        if fm.fileExists(atPath: dir.appendingPathComponent("notes.md").path) { return .done }
+        // Есть результаты действий — встреча «готова», даже если часть действий / повтор упали.
+        if !Self.results(in: dir).isEmpty { return .done }
         if let code = log.exitCode, code != 0 { return .failed }
+        // Действия выключены — готово, когда есть транскрипт и обработка завершилась успешно.
+        if log.exitCode == 0, fm.fileExists(atPath: dir.appendingPathComponent("transcript.md").path) { return .done }
         return .pending
+    }
+
+    /// Существующие файлы результатов действий в папке встречи, в порядке действий.
+    static func results(in dir: URL) -> [URL] {
+        let fm = FileManager.default
+        var names = ActionsStore.shared.outputs
+        if !names.contains("notes.md") { names.append("notes.md") } // встречи, обработанные до действий
+        return names.map { dir.appendingPathComponent($0) }.filter { fm.fileExists(atPath: $0.path) }
     }
 
     /// Последний код выхода и текущая стадия обработки — из хвоста process.log.

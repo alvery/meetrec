@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "id": "notes",
+      "name": "Write meeting notes",
+      "enabled": true,
+      "output": "notes.md",
+      "prompt": "Write well-structured and readable meeting notes based on what I said, heard, and wrote.\nThe goal is to make it easy for me to quickly recall what was discussed, decided, and planned during the meeting.\n\nFollow these formatting and writing rules carefully:\n\n### Structure\nOrganize the notes in the following order (omit any section if not relevant):\n1. Meeting Overview\n - Briefly summarize the purpose and key context of the meeting in 2–3 sentences.\n - Include participants, date, and duration.\n - Add 2–3 hashtags that serve as quick reminders of the main topics.\n2. Key Discussion Points\n - Bullet list of the main topics covered and important ideas shared.\n3. Decisions Made\n - Bullet list of clear outcomes, agreements, or conclusions reached.\n4. Action Items\n - Present as a Markdown table with the following columns:\n - Task: What needs to be done (concise and actionable)\n - Owner: Who is responsible (use real names)\n - Due / Timeline: If mentioned, include it; otherwise, leave blank.\n5. Key Sections\n - Divide the meeting into logical sections based on topic or flow.\n - For each section, include a short, descriptive title and the timestamp (start time in minutes or seconds) so I can easily locate it when listening back to the audio.\n6. Additional Context\n - Optional section for any relevant context, insights, or remarks not fitting above sections.\n\n### Writing Style\n - Use a clear, concise, and professional tone.\n - Do not include a title.\n - Structure the notes using proper heading levels, bullet points, and formatting.\n - Use level-2 headings (##) for each main section, and level-3 headings (###) for sub sections.\n - Add a horizontal divider (---) after each section.\n - Avoid repetition, filler, or unnecessary phrasing.\n - If my manual notes contradict the transcript, prioritize my manual notes."
+    },
+    {
+      "id": "action-items",
+      "name": "Extract action items",
+      "enabled": true,
+      "output": "action-items.md",
+      "prompt": "Analyze the entire meeting transcript and extract all unfinished or pending action items discussed during the conversation.\nIdentify any task, follow-up, or responsibility that was mentioned but not yet completed. Focus only on actionable items — things someone needs to do after the meeting.\n\n### Output Format:\nReturn the results as a markdown table format using the following columns for each action item:\n\n - Task: <concise, action-oriented summary of what needs to be done, including a timestamp at the end if applicable>\n - Assignee: <person responsible or \"Not specified\">\n - Due: <deadline or \"Not mentioned\">\n\nList each action item as a separate block following this structure.\n\n### Guidelines:\n • Exclude completed or historical tasks.\n • Combine duplicate or overlapping items into one concise entry.\n • Keep each task actionable and specific."
+    },
+    {
+      "id": "outline",
+      "name": "Generate outline",
+      "enabled": true,
+      "output": "outline.md",
+      "prompt": "Create a simple, chronological outline of everything discussed in the meeting.\n\n### Format\n - A nested bullet list in the order topics came up.\n - Top-level bullets: topics, each starting with the timestamp [mm:ss] where it began.\n - Sub-bullets: the key points, questions, and answers within that topic — short phrases, not full sentences.\n - Do not add a title, summary, or conclusions — only the outline."
+    }
+  ]
+}

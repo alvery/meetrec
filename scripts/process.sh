@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Обработка записанной встречи:
-#   mic + system (caf или m4a) → транскрипция (whisper.cpp + VAD) → transcript.md → notes.md (claude -p)
+#   mic + system (caf или m4a) → транскрипция (whisper.cpp + VAD) → transcript.md →
+#   действия (~/.config/meetrec/actions.json: заметки, action items, outline…) → свои .md (claude -p)
 #   Сегменты дорожек (track.caf, track.1.caf…) склеиваются по манифесту, паузы — тишиной.
 #   В конце исходные .caf (~2 ГБ/час) сжимаются в .m4a (десятки МБ/час).
 #   Технический лог пишется в process.log; если задан MEETREC_REPORT_HOST — отчёт уходит на сервер.
@@ -12,7 +13,8 @@
 #   WHISPER_MODEL        путь к ggml-модели (по умолчанию models/ggml-large-v3-turbo.bin)
 #   VAD_MODEL            путь к silero VAD (по умолчанию models/ggml-silero-v5.1.2.bin; нет файла — без VAD)
 #   WHISPER_LANG         язык: ru | en | auto (по умолчанию ru — для русской речи с англ. терминами)
-#   NOTES_CMD            shell-команда для заметок (по умолчанию "claude -p");
+#   MEETREC_ACTIONS      файл действий (по умолчанию ~/.config/meetrec/actions.json, нет — стандартные)
+#   NOTES_CMD            shell-команда для действий (по умолчанию "claude -p");
 #                        промпт передаётся последним аргументом, транскрипт — в stdin
 #   KEEP_RAW=1           не сжимать исходные .caf
 #   MEETREC_REPORT_HOST  user@server — автоматически отправлять технический отчёт (см. report.sh)
@@ -138,19 +140,13 @@ done
 echo "→ склеиваю дорожки"
 python3 "$ROOT/scripts/merge.py" "$DIR/mic.json" "$DIR/system.json" > "$DIR/transcript.md"
 
-echo "→ пишу заметки: $NOTES_CMD"
-# bash -c — чтобы NOTES_CMD мог содержать кавычки и аргументы с пробелами.
-# Пишем во временный файл: при ошибке не останется пустого notes.md.
+# Действия (заметки, action items, outline… — настраиваются в приложении): параллельно,
+# каждое — свой .md в папке встречи. Упавшее действие не мешает сжатию; код выхода — в конце.
+echo "→ действия над транскриптом: $NOTES_CMD"
 start=$(date +%s)
-if ! bash -c "$NOTES_CMD \"\$1\"" notes "$(cat "$ROOT/prompts/notes.md")" \
-     < "$DIR/transcript.md" > "$DIR/notes.md.part"; then
-  # Некоторые CLI (claude -p) пишут ошибку в stdout — покажем её, иначе в логе пусто.
-  echo "❌ команда заметок завершилась с ошибкой. Её вывод (начало):"
-  head -c 500 "$DIR/notes.md.part"; echo
-  rm -f "$DIR/notes.md.part"
-  exit 1
-fi
-mv "$DIR/notes.md.part" "$DIR/notes.md"
+actions_status=0
+python3 "$ROOT/scripts/run_actions.py" "$DIR" "${MEETREC_ACTIONS:-$HOME/.config/meetrec/actions.json}" "$NOTES_CMD" \
+  || actions_status=$?
 echo "  готово за $(( $(date +%s) - start )) с"
 
 # Сжатие исходников — в самом конце и не фатально: заметки важнее.
@@ -172,4 +168,4 @@ if [[ "${KEEP_RAW:-0}" != "1" ]]; then
 fi
 
 echo "✅ $DIR/transcript.md"
-echo "✅ $DIR/notes.md"
+exit "$actions_status"

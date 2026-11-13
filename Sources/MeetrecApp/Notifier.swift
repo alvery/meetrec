@@ -33,12 +33,16 @@ enum Notifier {
         ])
     }
 
-    static func notesReady(title: String, notes: URL, quiet: Bool) {
-        post(title: title, body: "Заметки готовы", category: Category.notes, info: ["path": notes.path], sound: !quiet)
+    /// Клик открывает главный результат (первое действие); в тексте — что получилось.
+    static func notesReady(title: String, results: [URL], quiet: Bool) {
+        let names = results.map { $0.deletingPathExtension().lastPathComponent }.joined(separator: ", ")
+        post(title: title, body: "Готово: \(names)", category: Category.notes,
+             info: ["path": results.first?.path ?? ""], sound: !quiet)
     }
 
-    static func failed(title: String, dir: URL, quiet: Bool) {
-        post(title: title, body: "Не удалось сделать заметки", category: Category.failed,
+    static func failed(title: String, dir: URL, partial: Bool, quiet: Bool) {
+        post(title: title, body: partial ? "Часть действий не выполнилась" : "Не удалось сделать заметки",
+             category: Category.failed,
              info: ["dir": dir.path, "title": title], sound: !quiet)
     }
 

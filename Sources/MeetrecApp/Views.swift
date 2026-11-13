@@ -13,6 +13,10 @@ struct MeetrecApp: App {
             MenuBarLabel(state: state)
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView().environmentObject(state)
+        }
     }
 }
 
@@ -327,11 +331,16 @@ struct RecentRow: View {
         .onHover { hovered = $0 }
         .help(hint)
         .contextMenu {
-            Button("Открыть заметки") { state.open(meeting.notes) }.disabled(meeting.status != .done)
+            ForEach(meeting.results, id: \.self) { file in
+                Button("Открыть \(file.lastPathComponent)") { state.open(file) }
+            }
+            Button("Открыть транскрипт") { state.open(meeting.transcript) }
+                .disabled(!FileManager.default.fileExists(atPath: meeting.transcript.path))
+            Divider()
             Button("Открыть папку") { state.open(meeting.url) }
             Button("Открыть лог обработки") { state.open(meeting.log) }
             Divider()
-            Button("Сделать заметки заново") { state.process(meeting.url, title: meeting.title) }
+            Button("Обработать заново") { state.process(meeting.url, title: meeting.title) }
                 .disabled(meeting.status == .recording || meeting.status.isProcessing)
         }
         .accessibilityLabel("\(meeting.title), \(Format.day(meeting.date)), \(statusText)")
@@ -352,7 +361,7 @@ struct RecentRow: View {
         switch meeting.status {
         case .recording: return "идёт запись"
         case .processing: return "обрабатывается"
-        case .done: return "заметки готовы"
+        case .done: return "готово"
         case .failed: return "ошибка обработки"
         case .pending: return "не обработана"
         }
@@ -360,7 +369,7 @@ struct RecentRow: View {
 
     private var hint: String {
         switch meeting.status {
-        case .done: return "Открыть заметки"
+        case .done: return "Открыть \(meeting.primaryResult.lastPathComponent)"
         case .failed: return "Открыть лог ошибки"
         case .pending: return "Сделать заметки"
         case .recording, .processing: return "Открыть папку"
@@ -369,7 +378,7 @@ struct RecentRow: View {
 
     private func primary() {
         switch meeting.status {
-        case .done: state.open(meeting.notes)
+        case .done: state.open(meeting.primaryResult)
         case .failed: state.open(meeting.log)
         case .pending: state.process(meeting.url, title: meeting.title)
         case .recording, .processing: state.open(meeting.url)
@@ -381,25 +390,18 @@ struct RecentRow: View {
 
 struct FooterSection: View {
     @EnvironmentObject var state: AppState
-    @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .icon
 
     var body: some View {
         HStack {
-            Menu {
-                Picker("В строке меню", selection: $labelMode) {
-                    ForEach(LabelMode.allCases) { Text($0.title).tag($0) }
-                }
-                Toggle("Запускать при входе", isOn: Binding(get: { state.launchAtLogin },
-                                                            set: { state.launchAtLogin = $0 }))
-                Button("Открыть папку встреч") { state.open(state.meetingsRoot) }
-                Button("Открыть файл настроек") { state.openConfig() }
-            } label: {
-                Image(systemName: "gearshape")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .accessibilityLabel("Настройки")
+            // Окно настроек; приложение без Dock-иконки — активируем, чтобы окно вышло поверх.
+            SettingsLink { Image(systemName: "gearshape") }
+                .buttonStyle(.borderless)
+                .keyboardShortcut(",", modifiers: .command)
+                .simultaneousGesture(TapGesture().onEnded { NSApp.activate(ignoringOtherApps: true) })
+                .help("Настройки (⌘,)").accessibilityLabel("Настройки")
+            Button { state.open(state.meetingsRoot) } label: { Image(systemName: "folder") }
+                .buttonStyle(.borderless)
+                .help("Открыть папку встреч").accessibilityLabel("Открыть папку встреч")
             Spacer()
             Button(state.isRecording ? "Остановить и выйти" : "Выйти") { state.quit() }
                 .keyboardShortcut("q", modifiers: .command)

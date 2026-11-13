@@ -12,7 +12,10 @@
 rec  ──►  mic.caf     («Я» — микрофон)
      └─►  system.caf  («Они» — системный звук через Core Audio process tap)
 
-process.sh ──► whisper.cpp + VAD (локально) ──► transcript.md ──► claude -p ──► notes.md
+process.sh ──► whisper.cpp + VAD (локально) ──► transcript.md ──► действия (claude -p, параллельно)
+                                                                  ├─► notes.md
+                                                                  ├─► action-items.md
+                                                                  └─► outline.md …
            └─► исходники .caf сжимаются в .m4a (~30 МБ/час)
 ```
 
@@ -131,7 +134,15 @@ swift build -c release      # бинарь: .build/release/rec
 | `NOTES_CMD` | `claude -p` | shell-команда (кавычки работают): промпт последним аргументом, транскрипт в stdin |
 | `KEEP_RAW` | `0` | `1` — не сжимать исходные .caf в .m4a |
 
-Промпт заметок — [`prompts/notes.md`](prompts/notes.md), правь под себя.
+### Действия
+
+После транскрипции запускаются **действия** (как actions в Shadow): каждое — промпт → свой `.md` в папке
+встречи. Стандартные: «Write meeting notes» → `notes.md`, «Extract action items» → `action-items.md`,
+«Generate outline» → `outline.md` ([`prompts/actions.default.json`](prompts/actions.default.json)).
+
+Добавлять, удалять, выключать и править промпты — в приложении: ⚙ (⌘,) → «Действия». Хранятся в
+`~/.config/meetrec/actions.json` — его же читает `process.sh` из терминала. К промпту автоматически
+добавляются пояснение «Я / Они», `meta.md` (название, время, участники) и транскрипт.
 
 ## Отладочные отчёты
 
