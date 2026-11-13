@@ -131,7 +131,7 @@ swift build -c release                     # CLI: .build/release/rec
 технические данные: версии, устройства, параметры файлов, логи `rec.log` / `process.log`.
 Аудио, транскрипты и заметки не отправляются.
 
-Требования и план — [SPEC.md](SPEC.md). Иконку рисует `scripts/make-icon.swift`, обложку — `docs/make-cover.py`.
+Что нового — [CHANGELOG.md](CHANGELOG.md). Требования и план — [SPEC.md](SPEC.md). Иконку рисует `scripts/make-icon.swift`, обложку — `docs/make-cover.py`.
 
 ## Лицензия
 

@@ -16,6 +16,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/.build/release/MeetrecApp" "$APP/Contents/MacOS/meetrec"
 VERSION="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+# Версия для «О программе» — из последнего тега vX.Y.Z (semver), иначе 0.0.0.
+SHORT_VERSION="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo v0.0.0)"
+SHORT_VERSION="${SHORT_VERSION#v}"
 
 # Иконка рисуется кодом (scripts/make-icon.swift) — пересобираем, только если скрипт изменился.
 ICON="$ROOT/.build/AppIcon.icns"
@@ -38,7 +41,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>meetrec</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2</string>
+  <key>CFBundleShortVersionString</key><string>${SHORT_VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>14.2</string>
   <key>LSUIElement</key><true/>
