@@ -23,6 +23,24 @@ final class CalendarService {
         return authorized
     }
 
+    /// Перепроверить доступ (пользователь мог включить его в Системных настройках без перезапуска).
+    func refreshAuthorization() -> Bool {
+        authorized = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        return authorized
+    }
+
+    /// Главная встреча (идущая или ближайшая) и следующая за ней.
+    func upcoming(now: Date = Date()) -> (main: MeetingEvent?, following: MeetingEvent?) {
+        guard let main = currentOrNext(now: now) else { return (nil, nil) }
+        let predicate = store.predicateForEvents(withStart: now, end: now.addingTimeInterval(24 * 3600), calendars: nil)
+        let following = store.events(matching: predicate)
+            .filter { !$0.isAllDay && $0.status != .canceled && !Self.declinedByMe($0) && $0.startDate > max(now, main.start) }
+            .map(Self.makeEvent)
+            .filter { $0.id != main.id }
+            .min { $0.start < $1.start }
+        return (main, following)
+    }
+
     /// Текущая (уже идущая) или ближайшая встреча в ближайшие 24 часа.
     /// Без весь-день-событий, отменённых и тех, от которых я отказался.
     /// Из идущих — со ссылкой на созвон, затем начавшаяся позже всех: длинный блок

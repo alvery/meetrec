@@ -88,6 +88,9 @@ public final class Recording {
         }
     }
 
+    /// Статус разрешения на системный звук без запроса: "authorized" | "denied" | "unknown" | nil.
+    public static func audioCapturePermissionStatus() -> String? { AudioCapturePermission.status() }
+
     /// Проверяет (и при необходимости запрашивает) разрешение на системный звук.
     /// Возвращает текст предупреждения, если разрешения нет, иначе nil.
     public static func ensureAudioCapturePermission() -> String? {

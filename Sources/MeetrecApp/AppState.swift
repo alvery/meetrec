@@ -1,19 +1,87 @@
+import AVFoundation
 import AppKit
+import EventKit
 import Foundation
 import RecorderKit
 import ServiceManagement
+import UserNotifications
+
+// MARK: - Встречи на диске
+
+enum MeetingStatus: Equatable {
+    case recording
+    case processing(stage: String?)
+    case done
+    case failed
+    case pending // записано, но не обработано
+
+    var isProcessing: Bool { if case .processing = self { return true } else { return false } }
+}
 
 /// Встреча на диске: папка в ~/Meetings.
 struct MeetingFolder: Identifiable, Equatable {
     let url: URL
     let title: String
     let date: Date
-    let hasNotes: Bool
-    /// process.sh держит этот каталог-замок, пока обрабатывает встречу (в т.ч. запущенный не нами).
-    var isProcessing: Bool { FileManager.default.fileExists(atPath: url.appendingPathComponent(".processing").path) }
+    let status: MeetingStatus
     var id: URL { url }
     var notes: URL { url.appendingPathComponent("notes.md") }
+    var log: URL { url.appendingPathComponent("process.log") }
 }
+
+// MARK: - Уровни звука
+
+/// Уровни во время записи — отдельный объект: 4 обновления в секунду перерисовывают
+/// только полоски, а не всё окно (минимум нагрузки во время созвона).
+@MainActor
+final class Meter: ObservableObject {
+    static let shared = Meter()
+    @Published private(set) var me: Float = 0
+    @Published private(set) var them: Float = 0
+    @Published private(set) var themSilentSeconds: Double = 0
+
+    func update(me peakMe: Float, them peakThem: Float, dt: Double) {
+        me = Self.normalized(peakMe)
+        them = Self.normalized(peakThem)
+        themSilentSeconds = peakThem < 0.001 ? themSilentSeconds + dt : 0 // < −60 dBFS
+    }
+
+    func reset() { me = 0; them = 0; themSilentSeconds = 0 }
+
+    /// Пик → 0…1 по шкале −50…0 dBFS: тихая речь собеседника (пик 0.02–0.1) видна, а не «пустая».
+    static func normalized(_ peak: Float) -> Float {
+        guard peak > 0 else { return 0 }
+        return min(1, max(0, (20 * log10(peak) + 50) / 50))
+    }
+}
+
+// MARK: - Разрешения
+
+enum Permission: String, Identifiable, CaseIterable {
+    case microphone, systemAudio, calendar, notifications
+    var id: String { rawValue }
+
+    var text: String {
+        switch self {
+        case .microphone: return "Нет доступа к микрофону — дорожка «Я» не запишется"
+        case .systemAudio: return "Нет доступа к системному звуку — дорожка «Они» будет тишиной"
+        case .calendar: return "Нет доступа к календарю — встречи не видны"
+        case .notifications: return "Уведомления выключены — подсказки «Записать?» не придут"
+        }
+    }
+
+    var settingsURL: URL {
+        let base = "x-apple.systempreferences:com.apple.preference."
+        switch self {
+        case .microphone: return URL(string: base + "security?Privacy_Microphone")!
+        case .systemAudio: return URL(string: base + "security?Privacy_ScreenCapture")!
+        case .calendar: return URL(string: base + "security?Privacy_Calendars")!
+        case .notifications: return URL(string: base + "notifications")!
+        }
+    }
+}
+
+// MARK: - Состояние приложения
 
 @MainActor
 final class AppState: ObservableObject {
@@ -22,22 +90,23 @@ final class AppState: ObservableObject {
     // Запись
     @Published private(set) var isRecording = false
     @Published private(set) var isStarting = false
-    @Published private(set) var elapsed: TimeInterval = 0
-    @Published private(set) var levelMe: Float = 0
-    @Published private(set) var levelThem: Float = 0
+    @Published private(set) var elapsedSeconds = 0
     @Published private(set) var recordingTitle: String?
     @Published private(set) var recordingDir: URL?
     @Published var errorText: String?
-    @Published var warningText: String?
 
     // Календарь
     @Published private(set) var event: MeetingEvent?
-    @Published private(set) var calendarAuthorized = true
+    @Published private(set) var followingEvent: MeetingEvent?
     @Published private(set) var promptEvent: MeetingEvent?
+    /// Меняется раз в минуту — чтобы обратный отсчёт в метке и окне не застывал.
+    @Published private(set) var minuteTick = 0
 
-    // Встречи на диске
+    // Разрешения и встречи
+    @Published private(set) var missingPermissions: [Permission] = []
     @Published private(set) var meetings: [MeetingFolder] = []
-    @Published private(set) var processing: Set<URL> = []
+    /// Обработка упала, а окно с тех пор не открывали — «!» в метке.
+    @Published private(set) var unseenFailure = false
 
     let meetingsRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Meetings")
     private let calendar = CalendarService()
@@ -45,13 +114,19 @@ final class AppState: ObservableObject {
     private var tickTimer: Timer?
     private var levelTimer: Timer?
     private var prompted: Set<String> = []
+    private var joinReminded: Set<String> = []
+    private var promptShownAt: Date?
+    private var started: Set<URL> = [] // обработки, запущенные приложением (до появления замка на диске)
+    private var audioPermissionWarned = false
     private var peakMe: Float = 0, peakThem: Float = 0
     private var levelTicks = 0
+
+    var processingMeeting: MeetingFolder? { meetings.first { $0.status.isProcessing } }
 
     private init() {
         refreshMeetings()
         Task {
-            calendarAuthorized = await calendar.requestAccess()
+            _ = await calendar.requestAccess()
             tick()
         }
         tickTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
@@ -59,28 +134,76 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: - Календарь и подсказка о записи
+    /// Присвоить, только если значение изменилось: @Published шлёт обновление даже при равенстве.
+    private func assign<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppState, T>, _ value: T) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+    }
 
-    /// Раз в 5 секунд: обновить встречу; если она идёт, а микрофон занят Zoom/Meet — предложить запись.
+    // MARK: - Периодическая проверка (раз в 5 с)
+
     func tick() {
         let now = Date()
-        event = calendar.currentOrNext(now: now)
-        if let e = promptEvent, now >= e.end { promptEvent = nil }
-        guard !isRecording, !isStarting, let e = event,
-              e.start.addingTimeInterval(-60) <= now, now < e.end,
-              !prompted.contains(e.id), defaultInputInUse()
-        else { return }
-        prompted.insert(e.id)
-        promptEvent = e
-        Notifier.meetingStarted(e)
+        assign(\.minuteTick, Int(now.timeIntervalSince1970 / 60))
+        let (main, following) = calendar.upcoming(now: now)
+        assign(\.event, main)
+        assign(\.followingEvent, following)
+
+        // Подсказка «Записать?» гаснет через 5 минут или с концом встречи.
+        if let e = promptEvent, now >= e.end || now.timeIntervalSince(promptShownAt ?? now) > 300 {
+            promptEvent = nil
+        }
+
+        // За минуту до встречи — напоминание с «Подключиться».
+        if let e = main, e.joinURL != nil, e.start > now, e.start.timeIntervalSince(now) <= 60,
+           !joinReminded.contains(e.id) {
+            joinReminded.insert(e.id)
+            Notifier.joinSoon(e)
+        }
+
+        // Встреча идёт и Zoom/Meet занял микрофон — предложить запись (один раз на встречу).
+        if !isRecording, !isStarting, let e = main,
+           e.start.addingTimeInterval(-60) <= now, now < e.end,
+           !prompted.contains(e.id), defaultInputInUse() {
+            prompted.insert(e.id)
+            promptEvent = e
+            promptShownAt = now
+            Notifier.meetingStarted(e)
+        }
+
+        refreshMeetings()
+        refreshPermissions()
     }
+
+    /// Окно открыли: всё актуализировать, «!» в метке погасить.
+    func popoverOpened() {
+        unseenFailure = false
+        tick()
+    }
+
+    func refreshPermissions() {
+        var missing: [Permission] = []
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .denied { missing.append(.microphone) }
+        if Recording.audioCapturePermissionStatus() == "denied" || audioPermissionWarned { missing.append(.systemAudio) }
+        if !calendar.refreshAuthorization(), EKEventStore.authorizationStatus(for: .event) != .notDetermined {
+            missing.append(.calendar)
+        }
+        let current = missing
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let denied = settings.authorizationStatus == .denied
+            Task { @MainActor in
+                AppState.shared.assign(\.missingPermissions, current + (denied ? [.notifications] : []))
+            }
+        }
+    }
+
+    // MARK: - Действия со встречей
 
     func join(_ event: MeetingEvent) {
         if let url = event.joinURL { NSWorkspace.shared.open(url) }
     }
 
-    func openCalendarPrivacy() {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")!)
+    func dismissPrompt() {
+        promptEvent = nil
     }
 
     // MARK: - Запись
@@ -92,7 +215,6 @@ final class AppState: ObservableObject {
         let dir = meetingsRoot.appendingPathComponent(Self.folderName(for: ev))
         isStarting = true
         errorText = nil
-        warningText = nil
         promptEvent = nil
         // Запросы разрешений блокируют поток до ответа пользователя — не на главном.
         Task.detached {
@@ -107,10 +229,12 @@ final class AppState: ObservableObject {
     private func finishStart(dir: URL, event: MeetingEvent?, micOK: Bool, audioWarning: String?) {
         isStarting = false
         guard micOK else {
-            errorText = "Нет доступа к микрофону: Системные настройки → Конфиденциальность → Микрофон → meetrec."
+            refreshPermissions()
+            errorText = "Запись не началась: нет доступа к микрофону."
             return
         }
-        warningText = audioWarning
+        audioPermissionWarned = audioWarning != nil
+        refreshPermissions()
         do {
             let rec = try Recording(dir: dir)
             if let event { Self.writeMeta(event, to: dir) }
@@ -119,23 +243,23 @@ final class AppState: ObservableObject {
             recordingTitle = event?.title
             recordingDir = dir
             isRecording = true
-            elapsed = 0
+            elapsedSeconds = 0
+            Meter.shared.reset()
             peakMe = 0; peakThem = 0; levelTicks = 0
             levelTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
                 Task { @MainActor in AppState.shared.updateLevels() }
             }
             refreshMeetings()
         } catch {
-            errorText = "Не удалось начать запись: \(error)"
+            errorText = "Запись не началась: \(error)"
         }
     }
 
     private func updateLevels() {
         guard let rec = recording else { return }
         let (me, them) = rec.takeLevels()
-        levelMe = me
-        levelThem = them
-        elapsed = rec.elapsed
+        Meter.shared.update(me: me, them: them, dt: 0.25)
+        assign(\.elapsedSeconds, Int(rec.elapsed))
         peakMe = max(peakMe, me)
         peakThem = max(peakThem, them)
         levelTicks += 1
@@ -154,8 +278,8 @@ final class AppState: ObservableObject {
         recording = nil
         recordingDir = nil
         isRecording = false
-        levelMe = 0; levelThem = 0
-        let title = recordingTitle ?? rec.dir.lastPathComponent
+        Meter.shared.reset()
+        let title = recordingTitle ?? Self.title(of: rec.dir)
         recordingTitle = nil
         process(rec.dir, title: title)
     }
@@ -163,11 +287,11 @@ final class AppState: ObservableObject {
     // MARK: - Обработка (scripts/process.sh из репозитория)
 
     func process(_ dir: URL, title: String) {
-        guard !processing.contains(dir), dir != recordingDir,
+        guard !started.contains(dir), dir != recordingDir,
               !FileManager.default.fileExists(atPath: dir.appendingPathComponent(".processing").path)
         else { return }
         guard let root = Bundle.main.object(forInfoDictionaryKey: "MeetrecRepoRoot") as? String else {
-            Notifier.failed(title: "Обработка не запущена", body: "В Info.plist нет MeetrecRepoRoot — пересобери build-app.sh")
+            errorText = "Обработка не запущена: в Info.plist нет MeetrecRepoRoot — пересобери build-app.sh"
             return
         }
         let p = Process()
@@ -183,21 +307,22 @@ final class AppState: ObservableObject {
             let ok = proc.terminationStatus == 0
             Task { @MainActor in
                 let state = AppState.shared
-                state.processing.remove(dir)
+                state.started.remove(dir)
                 state.refreshMeetings()
                 if ok {
-                    Notifier.notesReady(title: title, notes: dir.appendingPathComponent("notes.md"))
+                    Notifier.notesReady(title: title, notes: dir.appendingPathComponent("notes.md"), quiet: state.isRecording)
                 } else {
-                    Notifier.failed(title: "Обработка не удалась: \(title)",
-                                    body: "Код \(proc.terminationStatus). Подробности — process.log в папке встречи.")
+                    state.unseenFailure = true
+                    Notifier.failed(title: title, dir: dir, quiet: state.isRecording)
                 }
             }
         }
         do {
             try p.run()
-            processing.insert(dir)
+            started.insert(dir)
+            refreshMeetings()
         } catch {
-            Notifier.failed(title: "Обработка не запущена", body: "\(error)")
+            errorText = "Обработка не запущена: \(error.localizedDescription)"
         }
     }
 
@@ -207,21 +332,47 @@ final class AppState: ObservableObject {
         let fm = FileManager.default
         let dirs = (try? fm.contentsOfDirectory(at: meetingsRoot, includingPropertiesForKeys: [.creationDateKey, .isDirectoryKey],
                                                  options: [.skipsHiddenFiles])) ?? []
-        meetings = dirs
+        let list = dirs
             .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .map { dir -> MeetingFolder in
-                let date = (try? dir.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
-                return MeetingFolder(url: dir, title: Self.title(of: dir), date: date,
-                                     hasNotes: fm.fileExists(atPath: dir.appendingPathComponent("notes.md").path))
-            }
-            .sorted { $0.date > $1.date }
+            .map { dir -> (URL, Date) in (dir, (try? dir.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast) }
+            .sorted { $0.1 > $1.1 }
             .prefix(5)
-            .map { $0 }
+            .map { dir, date in MeetingFolder(url: dir, title: Self.title(of: dir), date: date, status: status(of: dir)) }
+        assign(\.meetings, list)
+    }
+
+    private func status(of dir: URL) -> MeetingStatus {
+        let fm = FileManager.default
+        if dir == recordingDir { return .recording }
+        let log = Self.logInfo(dir)
+        if started.contains(dir) || fm.fileExists(atPath: dir.appendingPathComponent(".processing").path) {
+            return .processing(stage: log.stage)
+        }
+        if let code = log.exitCode, code != 0 { return .failed }
+        if fm.fileExists(atPath: dir.appendingPathComponent("notes.md").path) { return .done }
+        return .pending
+    }
+
+    /// Последний код выхода и текущая стадия обработки — из хвоста process.log.
+    static func logInfo(_ dir: URL) -> (exitCode: Int32?, stage: String?) {
+        guard let h = try? FileHandle(forReadingFrom: dir.appendingPathComponent("process.log")) else { return (nil, nil) }
+        defer { try? h.close() }
+        let size = (try? h.seekToEnd()) ?? 0
+        try? h.seek(toOffset: size > 4096 ? size - 4096 : 0)
+        let tail = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
+        var exitCode: Int32?
+        var stage: String?
+        for line in tail.split(separator: "\n") {
+            if line.hasPrefix("=== exit ") { exitCode = Int32(line.dropFirst(9).trimmingCharacters(in: .whitespaces)) }
+            if line.hasPrefix("=== process.sh") { exitCode = nil } // начался новый прогон
+            if line.hasPrefix("→ ") { stage = String(line.dropFirst(2)) }
+        }
+        return (exitCode, stage)
     }
 
     func open(_ url: URL) { NSWorkspace.shared.open(url) }
 
-    // MARK: - Настройки
+    // MARK: - Настройки и выход
 
     var launchAtLogin: Bool {
         get { SMAppService.mainApp.status == .enabled }
@@ -236,10 +387,10 @@ final class AppState: ObservableObject {
     }
 
     func openConfig() {
-        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/meetrec/env")
-        NSWorkspace.shared.open(url)
+        open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/meetrec/env"))
     }
 
+    /// «Выйти» во время записи = «Остановить и выйти»: запись корректно закрывается и уходит в обработку.
     func quit() {
         stopRecording(reason: "выход из приложения")
         NSApp.terminate(nil)
@@ -250,9 +401,7 @@ final class AppState: ObservableObject {
     /// 2026-11-12-140312-sync-s-komandoy (или 2026-11-12-140312 без встречи). С секундами —
     /// чтобы повторный старт той же встречи (случайный «Стоп») не упёрся в занятую папку.
     static func folderName(for event: MeetingEvent?) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd-HHmmss"
-        let stamp = f.string(from: Date())
+        let stamp = Format.folderStamp.string(from: Date())
         guard let event else { return stamp }
         let latin = event.title.applyingTransform(.toLatin, reverse: false)?
             .applyingTransform(.stripDiacritics, reverse: false) ?? event.title
@@ -264,19 +413,18 @@ final class AppState: ObservableObject {
     }
 
     static func writeMeta(_ event: MeetingEvent, to dir: URL) {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm"
+        let f = Format.metaTime
         var text = "# \(event.title)\n\n- Время: \(f.string(from: event.start)) – \(f.string(from: event.end))\n"
         if !event.attendees.isEmpty { text += "- Участники: \(event.attendees.joined(separator: ", "))\n" }
         try? text.write(to: dir.appendingPathComponent("meta.md"), atomically: true, encoding: .utf8)
     }
 
-    /// Название встречи: первая строка meta.md («# …»), иначе имя папки.
+    /// Название встречи: первая строка meta.md («# …»), иначе «Запись без встречи».
     static func title(of dir: URL) -> String {
         if let meta = try? String(contentsOf: dir.appendingPathComponent("meta.md"), encoding: .utf8),
            let first = meta.split(separator: "\n").first, first.hasPrefix("# ") {
             return String(first.dropFirst(2))
         }
-        return dir.lastPathComponent
+        return "Запись без встречи"
     }
 }
