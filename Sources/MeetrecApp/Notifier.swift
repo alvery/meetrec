@@ -61,6 +61,7 @@ enum Notifier {
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Notifier.setUp(delegate: self)
+        MainActor.assumeIsolated { Hotkey.shared.apply() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

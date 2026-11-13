@@ -197,6 +197,7 @@ struct RecordButton: View {
         }
         .disabled(state.isStarting)
         .keyboardShortcut("r", modifiers: .command)
+        .help("Записать (⌘R" + (HotkeyMode.currentHint().map { "; из любого приложения — \($0)" } ?? "") + ")")
     }
 }
 
@@ -220,6 +221,7 @@ struct RecordingHero: View {
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(".", modifiers: .command)
+            .help("Остановить (⌘." + (HotkeyMode.currentHint().map { "; из любого приложения — \($0)" } ?? "") + ")")
             .padding(.top, 2)
         }
     }

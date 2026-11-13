@@ -359,6 +359,15 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Горячая клавиша: старт (с привязкой к идущей встрече) или стоп.
+    func toggleRecording() {
+        if isRecording {
+            stopRecording(reason: "горячая клавиша")
+        } else {
+            startRecording(for: promptEvent)
+        }
+    }
+
     /// Остановить запись и сразу запустить обработку.
     func stopRecording(reason: String = "кнопка Стоп") {
         guard let rec = recording else { return }

@@ -21,6 +21,9 @@ struct SettingsView: View {
 private struct GeneralSettings: View {
     @EnvironmentObject var state: AppState
     @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .icon
+    @AppStorage(Hotkey.modeKey) private var hotkeyMode: HotkeyMode = .off
+    @State private var axTrusted = Hotkey.accessibilityTrusted
+    private let axCheck = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Form {
@@ -39,6 +42,39 @@ private struct GeneralSettings: View {
             } footer: {
                 Text("Для каждой встречи — своя папка: запись, transcript.md сразу после транскрипции, затем результаты действий.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Picker("Старт / стоп записи", selection: $hotkeyMode) {
+                    ForEach(HotkeyMode.allCases) { Text($0.title).tag($0) }
+                }
+                if hotkeyMode == .combo {
+                    LabeledContent("Сочетание") { ShortcutRecorder() }
+                }
+                if hotkeyMode.modifier != nil && !axTrusted {
+                    HStack(alignment: .firstTextBaseline) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("Нужен «Универсальный доступ» для meetrec — иначе двойное нажатие не сработает.")
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("Разрешить…") {
+                            Hotkey.requestAccessibility()
+                            state.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                        }
+                    }
+                }
+            } header: {
+                Text("Горячая клавиша")
+            } footer: {
+                Text("Работает из любого приложения: первое нажатие начинает запись (с привязкой к идущей встрече), второе — останавливает и запускает обработку. Сочетание клавиш не требует разрешений; двойное нажатие — требует «Универсальный доступ»: без него macOS не даёт видеть нажатия в других приложениях.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .onChange(of: hotkeyMode) { Hotkey.shared.apply() }
+            .onReceive(axCheck) { _ in
+                let trusted = Hotkey.accessibilityTrusted
+                if trusted != axTrusted {
+                    axTrusted = trusted
+                    Hotkey.shared.apply() // монитор нажатий заработает только после выдачи доступа
+                }
             }
             Section {
                 Picker("В строке меню", selection: $labelMode) {
@@ -68,6 +104,48 @@ private struct GeneralSettings: View {
         panel.prompt = "Выбрать"
         NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, let url = panel.url { state.setMeetingsRoot(url) }
+    }
+}
+
+/// Запись сочетания: «Задать…» → нажать сочетание с ⌘/⌥/⌃ (⎋ — отмена).
+private struct ShortcutRecorder: View {
+    @AppStorage(Hotkey.displayKey) private var display = ""
+    @State private var listening = false
+    @State private var monitor: Any?
+
+    var body: some View {
+        HStack {
+            Text(listening ? "Нажми сочетание… (⎋ — отмена)" : (display.isEmpty ? "Не задано" : display))
+                .font(.system(.body, design: .rounded).weight(listening ? .regular : .semibold))
+                .foregroundStyle(listening ? Color.accentColor : (display.isEmpty ? .secondary : .primary))
+            Button(listening ? "Отмена" : "Задать…") { listening ? stop() : start() }
+        }
+        .onDisappear { stop() }
+    }
+
+    private func start() {
+        listening = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            if e.keyCode == 53 { stop(); return nil } // ⎋
+            let mods = e.modifierFlags.intersection([.command, .option, .control, .shift])
+            guard !mods.intersection([.command, .option, .control]).isEmpty else {
+                NSSound.beep() // без ⌘/⌥/⌃ сочетание будет мешать обычному набору текста
+                return nil
+            }
+            let d = UserDefaults.standard
+            d.set(Int(e.keyCode), forKey: Hotkey.keyCodeKey)
+            d.set(Int(mods.rawValue), forKey: Hotkey.modifiersKey)
+            display = Hotkey.display(keyCode: e.keyCode, modifiers: mods, characters: e.charactersIgnoringModifiers)
+            stop()
+            Hotkey.shared.apply()
+            return nil
+        }
+    }
+
+    private func stop() {
+        listening = false
+        if let m = monitor { NSEvent.removeMonitor(m) }
+        monitor = nil
     }
 }
 
