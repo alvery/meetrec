@@ -56,9 +56,9 @@
 
   <!-- название и смысл -->
   <text x="516" y="300" font-size="104" font-weight="800" letter-spacing="-3" fill="url(#word)">meetrec</text>
-  <text x="520" y="358" font-size="27" fill="#c3c8d6">Записывает созвоны в Zoom и Meet,</text>
-  <text x="520" y="394" font-size="27" fill="#c3c8d6">расшифровывает на Mac и делает заметки.</text>
-  <rect x="520" y="452" width="240" height="36" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/><circle cx="538" cy="470" r="5" fill="#ff5a3c"/><text x="552" y="476" font-size="17" fill="#c9cede">Я / Они — две дорожки</text><rect x="771.6" y="452" width="172" height="36" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/><circle cx="789.6" cy="470" r="5" fill="#9b5cff"/><text x="803.6" y="476" font-size="17" fill="#c9cede">whisper на Mac</text><rect x="956.0" y="452" width="153" height="36" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/><circle cx="974.0" cy="470" r="5" fill="#2fd6ff"/><text x="988.0" y="476" font-size="17" fill="#c9cede">без подписки</text>
+  <text x="520" y="358" font-size="27" fill="#c3c8d6">Records your Zoom and Meet calls,</text>
+  <text x="520" y="394" font-size="27" fill="#c3c8d6">transcribes on your Mac and writes the notes.</text>
+  <rect x="520" y="452" width="249" height="36" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/><circle cx="538" cy="470" r="5" fill="#ff5a3c"/><text x="552" y="476" font-size="17" fill="#c9cede">Me / Them — two tracks</text><rect x="781.2" y="452" width="201" height="36" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/><circle cx="799.2" cy="470" r="5" fill="#9b5cff"/><text x="813.2" y="476" font-size="17" fill="#c9cede">whisper on-device</text><rect x="994.4000000000001" y="452" width="182" height="36" rx="18" fill="#fff" fill-opacity=".06" stroke="#fff" stroke-opacity=".12"/><circle cx="1012.4000000000001" cy="470" r="5" fill="#2fd6ff"/><text x="1026.4" y="476" font-size="17" fill="#c9cede">no subscription</text>
 
-  <text x="520" y="560" font-size="15" fill="#6f778a">macOS 14.2+ · Apple Silicon · строка меню · календарь · заметки через твой AI-шлюз</text>
+  <text x="520" y="560" font-size="15" fill="#6f778a">macOS 14.2+ · Apple Silicon · menu bar · calendar · notes via your own AI gateway</text>
 </svg>

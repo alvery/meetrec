@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Генерирует docs/cover.svg — обложку README в стиле иконки «Спектр».
+"""Генерирует обложки README в стиле иконки «Спектр»: docs/cover.svg (en) и docs/cover.ru.svg (ru).
 
-Использование: python3 docs/make-cover.py   (пишет docs/cover.svg рядом со скриптом)
+Использование: python3 docs/make-cover.py
+Макет строки меню и плашки — на русском в обоих вариантах: так выглядит само приложение.
 SVG не умеет конический градиент — дуга собирается из коротких отрезков, как в scripts/make-icon.swift.
 """
 import math
@@ -75,9 +76,24 @@ def chip(x, y, text, dot=None):
             f'{d}<text x="{tx}" y="{y + 24}" font-size="17" fill="#c9cede">{text}</text>'), w
 
 
-def main():
+TEXT = {
+    "en": {"file": "cover.svg",
+           "line1": "Records your Zoom and Meet calls,",
+           "line2": "transcribes on your Mac and writes the notes.",
+           "chips": ["Me / Them — two tracks", "whisper on-device", "no subscription"],
+           "foot": "macOS 14.2+ · Apple Silicon · menu bar · calendar · notes via your own AI gateway"},
+    "ru": {"file": "cover.ru.svg",
+           "line1": "Записывает созвоны в Zoom и Meet,",
+           "line2": "расшифровывает на Mac и делает заметки.",
+           "chips": ["Я / Они — две дорожки", "whisper на Mac", "без подписки"],
+           "foot": "macOS 14.2+ · Apple Silicon · строка меню · календарь · заметки через твой AI-шлюз"},
+}
+
+
+def main(lang):
+    t = TEXT[lang]
     chips, cx = [], 520
-    for text, dot in [("Я / Они — две дорожки", "#ff5a3c"), ("whisper на Mac", "#9b5cff"), ("без подписки", "#2fd6ff")]:
+    for text, dot in zip(t["chips"], ["#ff5a3c", "#9b5cff", "#2fd6ff"]):
         svg, w = chip(cx, 452, text, dot)
         chips.append(svg)
         cx += w + 12
@@ -132,18 +148,19 @@ def main():
 
   <!-- название и смысл -->
   <text x="516" y="300" font-size="104" font-weight="800" letter-spacing="-3" fill="url(#word)">meetrec</text>
-  <text x="520" y="358" font-size="27" fill="#c3c8d6">Записывает созвоны в Zoom и Meet,</text>
-  <text x="520" y="394" font-size="27" fill="#c3c8d6">расшифровывает на Mac и делает заметки.</text>
+  <text x="520" y="358" font-size="27" fill="#c3c8d6">{t["line1"]}</text>
+  <text x="520" y="394" font-size="27" fill="#c3c8d6">{t["line2"]}</text>
   {"".join(chips)}
 
-  <text x="520" y="560" font-size="15" fill="#6f778a">macOS 14.2+ · Apple Silicon · строка меню · календарь · заметки через твой AI-шлюз</text>
+  <text x="520" y="560" font-size="15" fill="#6f778a">{t["foot"]}</text>
 </svg>
 '''
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cover.svg")
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), t["file"])
     with open(path, "w", encoding="utf-8") as f:
         f.write(svg)
     print(path)
 
 
 if __name__ == "__main__":
-    main()
+    for lang in TEXT:
+        main(lang)

@@ -1,138 +1,147 @@
-<p align="center"><img src="docs/cover.svg" alt="meetrec — записывает созвоны в Zoom и Meet, расшифровывает на Mac и делает заметки" width="100%"></p>
+<p align="center"><img src="docs/cover.svg" alt="meetrec — records your Zoom and Meet calls, transcribes on your Mac and writes the notes" width="100%"></p>
+
+<p align="center"><b>English</b> · <a href="README.ru.md">Русский</a></p>
 
 # meetrec
 
-Лёгкий записыватель созвонов для macOS: живёт в строке меню, знает твой календарь, пишет Zoom / Google Meet
-без бота во встрече, расшифровывает **локально** (whisper.cpp на Apple Silicon) и делает заметки через
-**твой** AI-агент. Без подписки и без облака посередине.
+A lightweight meeting recorder for macOS. It lives in the menu bar, knows your calendar, records Zoom and
+Google Meet without a bot joining the call, transcribes **on-device** (whisper.cpp on Apple Silicon) and writes
+notes through **your own** AI agent. No subscription and no third-party cloud in the middle.
 
-- **Календарь.** Кольцо в строке меню отсчитывает время до встречи. За минуту до начала появляется плашка
-  «Подключиться» с проверкой микрофона и наушников и задачами с прошлой встречи той же серии.
-- **Запись в две дорожки.** «Я» — микрофон, «Они» — системный звук. Разделение спикеров точное, без ML.
-  Встреча идёт и Zoom занял микрофон: плашка «Записать?». Созвон закончился: «Остановить запись?».
-- **★ Метки.** ⌃⌥M во время записи отмечает важный момент. Заметки уделят ему особое внимание.
-- **Действия после записи.** Заметки, задачи, конспект или свои промпты, каждое — в свой `.md` в папке встречи.
-- **Всё — обычные файлы:** `~/Meetings/<дата>-<встреча>/` с транскриптом, заметками и сжатым аудио.
+> The app UI is in Russian for now. Transcription defaults to Russian; set `WHISPER_LANG=en` or `auto`
+> (see [Development](#development)) for other languages.
 
-## Как устроено
+- **Calendar.** The menu bar ring counts down to your next meeting. A minute before it starts, a «Подключиться»
+  (Join) panel appears with a mic and headphones check and the open tasks from the previous meeting in the same series.
+- **Two-track recording.** «Я» (me) is your microphone, «Они» (them) is system audio, so speakers are
+  separated exactly, with no ML diarization. When a meeting is on and Zoom takes the mic, meetrec offers to record.
+  When the call ends, it offers to stop.
+- **★ Marks.** Press ⌃⌥M during a recording to flag an important moment. The notes pay special attention to it.
+- **Actions after recording.** Notes, action items, an outline or your own prompts, each written to its own
+  `.md` in the meeting folder.
+- **Plain files:** `~/Meetings/<date>-<meeting>/` holds the transcript, the notes and compressed audio.
+
+## How it works
 
 ```
-запись ──► mic.caf («Я»)  +  system.caf («Они», Core Audio process tap)
-                    │
-                    ▼
-     whisper.cpp + VAD на твоём Mac ──► transcript.md
-                    │
-                    ▼  только текст транскрипта
-     твой агент (OpenAI-совместимый API) ──► notes.md · action-items.md · outline.md …
+recording ──► mic.caf («Я», me)  +  system.caf («Они», them — Core Audio process tap)
+                      │
+                      ▼
+       whisper.cpp + VAD on your Mac ──► transcript.md
+                      │
+                      ▼  transcript text only
+       your agent (OpenAI-compatible API) ──► notes.md · action-items.md · outline.md …
 ```
 
-**Аудио никогда не покидает Mac.** Агенту уходит только текст транскрипта и название встречи с участниками.
-Куда именно — решаешь ты (см. «Агент для заметок»).
+**Audio never leaves your Mac.** The agent receives only the transcript text plus the meeting title and
+attendees. Which agent that is is up to you (see [Notes agent](#notes-agent)).
 
-## Установка
+## Install
 
-Нужны **Apple Silicon** и **macOS 14.2+**, Xcode Command Line Tools (`xcode-select --install`) и
+You need **Apple Silicon**, **macOS 14.2+**, Xcode Command Line Tools (`xcode-select --install`) and
 [Homebrew](https://brew.sh).
 
 ```bash
 git clone https://github.com/alvery/meetrec.git && cd meetrec
-./scripts/setup.sh        # whisper.cpp + модели large-v3-turbo и silero VAD (~1,6 ГБ, один раз)
-./scripts/build-app.sh    # соберёт meetrec.app, поставит в ~/Applications и запустит
+./scripts/setup.sh        # whisper.cpp + large-v3-turbo and silero VAD models (~1.6 GB, once)
+./scripts/build-app.sh    # builds meetrec.app, installs it to ~/Applications and launches it
 ```
 
-При первом запуске meetrec попросит доступ к **календарю**, **микрофону** и **записи системного звука**.
-Разреши все три. Календари Google подключаются в Системные настройки → Учётные записи интернета.
+On first launch meetrec asks for access to your **calendar**, **microphone** and **system audio recording**.
+Allow all three. Google calendars are added in System Settings → Internet Accounts.
 
-Обновиться: `./scripts/dev.sh app` (git pull + сборка + перезапуск).
+To update: `./scripts/dev.sh app` (git pull + build + relaunch).
 
-### Постоянная подпись (рекомендуется)
+### Stable code signature (recommended)
 
-Без неё macOS может заново спрашивать разрешения после каждой пересборки. Сертификат делается один раз:
+Without it macOS may ask for permissions again after every rebuild. Create a certificate once:
 
-1. «Связка ключей» → меню «Связка ключей» → «Ассистент сертификации» → «Создать сертификат…»
-2. Имя `meetrec-dev`, тип «Самоподписанный корневой», тип сертификата «Подписание кода» → «Создать».
-3. `mkdir -p ~/.config/meetrec && echo 'MEETREC_SIGN_ID=meetrec-dev' >> ~/.config/meetrec/env`, затем `./scripts/build-app.sh`.
+1. Keychain Access → Keychain Access menu → Certificate Assistant → Create a Certificate…
+2. Name `meetrec-dev`, identity type «Self Signed Root», certificate type «Code Signing» → Create.
+3. `mkdir -p ~/.config/meetrec && echo 'MEETREC_SIGN_ID=meetrec-dev' >> ~/.config/meetrec/env`, then `./scripts/build-app.sh`.
 
-### Агент для заметок
+### Notes agent
 
-Без агента после записи будет только транскрипт; meetrec напомнит об этом строкой в окне.
-Настраивается в ⚙ (⌘,) → **«Агент»**, кнопка **«Проверить»** показывает, всё ли работает. Варианты:
+Without an agent you only get the transcript; meetrec reminds you with a line in its window.
+Set it up in ⚙ (⌘,) → **«Агент»** (Agent); the **«Проверить»** (Check) button tells you whether everything works. Options:
 
-| Вариант | Что указать | Где обрабатывается транскрипт |
+| Option | What to enter | Where the transcript is processed |
 |---|---|---|
-| **Свой сервер с Claude** (так сделано у автора) | «SSH-туннель к»: `user@server`; токен — кнопкой «С сервера» | на твоём сервере, по твоей подписке Claude |
-| **Любой OpenAI-совместимый API** | «Свой адрес API», токен, модель | у провайдера API |
-| **Локальная модель** (Ollama, LM Studio) | адрес вроде `http://127.0.0.1:11434/v1` | на твоём Mac |
-| **Claude Code на этом Mac** | явно, в `~/.config/meetrec/env`: `NOTES_CMD="/полный/путь/к/claude -p"` (`which claude`) | у Anthropic, по твоей подписке |
+| **Your own server with Claude** (the author's setup) | «SSH-туннель к» (SSH tunnel to): `user@server`; token via «С сервера» (From server) | on your server, with your Claude subscription |
+| **Any OpenAI-compatible API** | «Свой адрес API» (custom API URL), token, model | at the API provider |
+| **Local model** (Ollama, LM Studio) | a URL like `http://127.0.0.1:11434/v1` | on your Mac |
+| **Claude Code on this Mac** | explicitly, in `~/.config/meetrec/env`: `NOTES_CMD="/full/path/to/claude -p"` (`which claude`) | at Anthropic, with your subscription |
 
-Свой сервер: на сервере с установленным и залогиненным [Claude Code](https://claude.com/claude-code)
-выполни `./gateway/install.sh` из этого репозитория. Он поставит `meetrec-gateway` как сервис systemd
-(слушает только `127.0.0.1:8787`, наружу ничего не открывается) и создаст токен. Mac ходит к нему по SSH-туннелю,
-который meetrec поднимает сам; нужен вход по ключу (`ssh user@server true` без пароля).
+Your own server: on a server with [Claude Code](https://claude.com/claude-code) installed and logged in, run
+`./gateway/install.sh` from this repository. It installs `meetrec-gateway` as a systemd service (listening only on
+`127.0.0.1:8787`, nothing exposed to the internet) and creates a token. The Mac reaches it through an SSH tunnel
+that meetrec opens by itself; key-based login is required (`ssh user@server true` without a password).
 
-## Как пользоваться
+## Usage
 
-Иконка-кольцо в строке меню показывает состояние:
+The menu bar ring shows the state:
 
-| Иконка | Что значит |
+| Icon | Meaning |
 |---|---|
-| приглушённое кольцо с полосками «Я / Они» | встреч в ближайший час нет |
-| дуга заполняется по часовой | встреча через ≤ 60 мин |
-| тающий сектор | встреча идёт, сектор — оставшееся время |
-| мигающая точка | встреча идёт, микрофон занят: «Записать?» |
-| **красная** точка, кольцо — остаток встречи | идёт запись; за 5 минут до конца кольцо **жёлтое** |
-| ★ на секунду | метка поставлена |
-| ⋯ / ✓ / ! | делаю заметки / готово / не получилось |
+| dimmed ring with «Я / Они» bars | no meetings in the next hour |
+| arc fills clockwise | meeting in ≤ 60 min |
+| shrinking pie | meeting in progress, pie is the time left |
+| blinking dot | meeting in progress and the mic is busy: record? |
+| **red** dot, ring is the time left | recording; the ring turns **yellow** 5 minutes before the end |
+| ★ for a second | mark added |
+| ⋯ / ✓ / ! | writing notes / done / failed |
 
-Окно по клику: ближайшая встреча и главная кнопка по фазе («Подключиться» ⌘J, «Записать» ⌘R),
-во время записи — уровни дорожек, «Метка» и «Остановить» (⌘.), ниже — пять недавних встреч.
-Клик по встрече открывает заметки; при ошибке видно причину и кнопку ↻ «Повторить».
-Правый клик: транскрипт, папка, лог, повтор действий или полная обработка.
+Click the icon to open the window. It shows the next meeting and one main button for the current phase:
+«Подключиться» (Join, ⌘J) or «Записать» (Record, ⌘R). While recording it shows track levels, «Метка» (Mark)
+and «Остановить» (Stop, ⌘.). Below are the five most recent meetings. Click a meeting to open its notes;
+if processing failed you see the reason and a ↻ retry button. Right-click for the transcript, folder, log,
+re-running the actions or a full reprocess.
 
-**Горячие клавиши из любого приложения:** старт / стоп записи — ⚙ → «Горячая клавиша»
-(двойное ⌘ / ⌥ / ⌃ / ⇧ или своё сочетание); ★ метка — ⌃⌥M, только во время записи.
+**Global hotkeys:** start / stop recording is set in ⚙ → «Горячая клавиша» (Hotkey): a double tap of
+⌘ / ⌥ / ⌃ / ⇧ or your own shortcut. ★ mark is ⌃⌥M, active only while recording.
 
-**Действия** — ⚙ → «Действия»: стандартные «Заметки», «Задачи» и «Конспект»
-([`prompts/actions.default.json`](prompts/actions.default.json)), можно добавить свои,
-выбрать модель для каждого и поменять порядок. Хранятся в `~/.config/meetrec/actions.json`.
+**Actions** are in ⚙ → «Действия» (Actions). The defaults are notes, action items and an outline
+([`prompts/actions.default.json`](prompts/actions.default.json)). You can add your own, pick a model for each and
+reorder them. They are stored in `~/.config/meetrec/actions.json`.
 
-**Иконка пропала?** На MacBook с вырезом macOS прячет иконки, которым не хватило места слева от выреза.
-Перетащи meetrec ближе к часам: ⌘ + перетаскивание мышью.
+**Icon missing?** On MacBooks with a notch, macOS hides menu bar icons that don't fit to the left of it.
+Move meetrec closer to the clock: hold ⌘ and drag the icon.
 
-**Советы:** пользуйся наушниками (иначе голоса собеседников попадут и в дорожку «Я»). Звук уведомлений
-и музыки во время созвона тоже попадёт в запись.
+**Tips:** use headphones, otherwise the other side's voices also end up in your «Я» track. Notification sounds
+and music during a call are recorded too.
 
-## Для разработки
+## Development
 
 ```bash
 swift build -c release                     # CLI: .build/release/rec
-.build/release/rec ~/Meetings/test         # запись из терминала (Ctrl+C — стоп)
-./scripts/process.sh ~/Meetings/test       # обработка: whisper → transcript.md → действия
-./scripts/process.sh --actions-only DIR    # только действия (транскрипт уже есть)
-./scripts/mock-meeting.sh --day            # тестовые встречи в отдельном календаре meetrec-test
-./scripts/mock-meeting.sh --clean          # удалить их
+.build/release/rec ~/Meetings/test         # record from the terminal (Ctrl+C to stop)
+./scripts/process.sh ~/Meetings/test       # process: whisper → transcript.md → actions
+./scripts/process.sh --actions-only DIR    # actions only (the transcript already exists)
+./scripts/mock-meeting.sh --day            # test meetings in a separate «meetrec-test» calendar
+./scripts/mock-meeting.sh --clean          # remove them
 ```
 
-Из терминала разрешения выдаются **приложению терминала**. Системный звук терминалу выдаётся вручную:
-Конфиденциальность и безопасность → «Запись экрана и системного звука» → нижний список
-«Только запись системного звука» → + → терминал.
+When run from a terminal, permissions are granted to **the terminal app**. System audio has to be granted to
+the terminal manually: Privacy & Security → Screen & System Audio Recording → the lower «System Audio Recording
+Only» list → + → your terminal.
 
-Настройки обработки — в `~/.config/meetrec/env` (`KEY=value`, переменные командной строки важнее):
+Processing settings live in `~/.config/meetrec/env` (`KEY=value`; command-line variables take precedence):
 
-| Переменная | По умолчанию | |
+| Variable | Default | |
 |---|---|---|
-| `WHISPER_LANG` | `ru` | `ru`, `en` или `auto` |
-| `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | любая ggml-модель whisper.cpp |
-| `NOTES_CMD` | `claude -p` | команда для действий без шлюза (лучше с полным путём): промпт — последним аргументом, транскрипт — в stdin |
-| `KEEP_RAW` | `0` | `1` — не сжимать исходные .caf в .m4a |
-| `MEETREC_REPORT_HOST` | — | `user@server`: после обработки отправлять технический отчёт по SSH (без аудио и текста) |
+| `WHISPER_LANG` | `ru` | `ru`, `en` or `auto` |
+| `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | any whisper.cpp ggml model |
+| `NOTES_CMD` | `claude -p` | command for actions without a gateway (prefer a full path): prompt as the last argument, transcript on stdin |
+| `KEEP_RAW` | `0` | `1` keeps the raw .caf files instead of compressing them to .m4a |
+| `MEETREC_REPORT_HOST` | — | `user@server`: send a technical report over SSH after processing (no audio, no text) |
 
-Отладочные отчёты (`scripts/report.sh`) выключены, пока не задан `MEETREC_REPORT_HOST`. В них только
-технические данные: версии, устройства, параметры файлов, логи `rec.log` / `process.log`.
-Аудио, транскрипты и заметки не отправляются.
+Debug reports (`scripts/report.sh`) are off unless `MEETREC_REPORT_HOST` is set. They contain only technical
+data: versions, devices, file parameters and the `rec.log` / `process.log` logs. Audio, transcripts and notes are
+never sent.
 
-Что нового — [CHANGELOG.md](CHANGELOG.md). Требования и план — [SPEC.md](SPEC.md). Иконку рисует `scripts/make-icon.swift`, обложку — `docs/make-cover.py`.
+Changes are in [CHANGELOG.md](CHANGELOG.md), requirements and plans in [SPEC.md](SPEC.md) (both in Russian).
+The app icon is drawn by `scripts/make-icon.swift`, the cover by `docs/make-cover.py`.
 
-## Лицензия
+## License
 
 [MIT](LICENSE)
