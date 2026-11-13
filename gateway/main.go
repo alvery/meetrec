@@ -98,8 +98,12 @@ func loadToken(path string) (string, error) {
 
 func (s *server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		header := r.Header.Get("Authorization")
+		got := strings.TrimPrefix(header, "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
+			// Для диагностики — только форма, не сам токен.
+			log.Printf("401 %s %s: заголовок Authorization %s, длина токена %d (ожидается %d)", r.Method, r.URL.Path,
+				map[bool]string{true: "есть", false: "НЕТ"}[header != ""], len(got), len(s.token))
 			apiError(w, http.StatusUnauthorized, "invalid_api_key", "неверный токен шлюза")
 			return
 		}
